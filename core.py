@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 # === Constants ==============================================================
 
-PLAYERS_HEADER = ["name", "created_at", "seed_elo"]
+PLAYERS_HEADER = ["name", "created_at", "seed_singles", "seed_doubles"]
 MATCHES_HEADER = [
     "id", "timestamp_iso", "format",
     "team_a", "team_b", "score_a", "score_b", "recorded_by",
@@ -59,6 +59,20 @@ SAMPLE_PLAYERS = [
 def _parse_team(raw):
     """'Alice;Bob' -> ['Alice', 'Bob']  (drops empties)."""
     return [p for p in (raw or "").split(";") if p.strip()]
+
+
+def match_format(m):
+    """Normalized format of a match: '1v1' or '2v2' (inferred from team sizes
+    if the stored 'format' field is missing/odd)."""
+    f = (m.get("format") or "").strip()
+    if f in ("1v1", "2v2"):
+        return f
+    a, b = _parse_team(m.get("team_a")), _parse_team(m.get("team_b"))
+    if len(a) == 1 and len(b) == 1:
+        return "1v1"
+    if len(a) == 2 and len(b) == 2:
+        return "2v2"
+    return f
 
 
 def _iso_week_key(ts_iso):
@@ -244,20 +258,25 @@ def _reign_stats(timeline):
     return longest, current
 
 
-def compute_stats(matches, roster=None, seed_map=None):
+def compute_stats(matches, roster=None, seed_map=None, fmt=None):
     """
-    Pure function: replay the full `matches` list (sorted by timestamp asc) from
-    scratch to derive current ratings and stats. `matches` must already contain
-    any trial/extra matches layered in by the caller — this function does no IO.
-    `roster` is an optional iterable of player display names to include on the
-    board even with 0 games (the stored roster). `seed_map` is an optional
-    {name: seed_elo} mapping giving each player's STARTING rating and peak;
-    players absent from it (e.g. trial-invented names) default to START_RATING.
+    Pure function: replay a match list (sorted by timestamp asc) from scratch to
+    derive current ratings and stats for ONE rating track. `matches` must already
+    contain any trial/extra matches layered in by the caller — this does no IO.
+
+    `fmt` ('1v1' or '2v2') filters the match list to that format so Singles and
+    Doubles are two independent stat worlds; None means "all matches". `roster`
+    is an iterable of player names to include even with 0 games. `seed_map` is a
+    {name: seed} mapping giving each player's STARTING rating and peak for THIS
+    track (seed_singles for '1v1', seed_doubles for '2v2'); players absent from
+    it (e.g. trial-invented names) default to START_RATING.
 
     Returns {"players": {name: stat}, "leaderboard": [...], "matches": [...]}.
     Handles the empty-log case gracefully.
     """
     matches = list(matches or [])
+    if fmt:
+        matches = [m for m in matches if match_format(m) == fmt]
     matches.sort(key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
 
     seed_map = seed_map or {}
@@ -400,14 +419,19 @@ def compute_stats(matches, roster=None, seed_map=None):
     }
 
 
-def match_breakdown(matches, roster=None, seed_map=None, match_id=None):
+def match_breakdown(matches, roster=None, seed_map=None, match_id=None, fmt=None):
     """
-    Replay `matches` and return the rating breakdown for the match whose id is
-    `match_id` (typically the just-recorded one): per-player old->new rating,
-    role and X applied, plus (for doubles) the two side averages, gap and bucket.
+    Replay only the `fmt`-format matches and return the rating breakdown for the
+    match whose id is `match_id` (typically the just-recorded one): per-player
+    old->new rating, role and X applied, plus (for doubles) the two side
+    averages, gap and bucket. Filtering by `fmt` (and using that track's
+    seed_map) means a 1v1 record moves only Singles and a 2v2 only Doubles.
     Returns None if the id isn't found. Pure — same seeded ratings as compute_stats.
     """
-    matches = sorted(list(matches or []),
+    matches = list(matches or [])
+    if fmt:
+        matches = [m for m in matches if match_format(m) == fmt]
+    matches = sorted(matches,
                      key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     seed_map = seed_map or {}
 
@@ -743,65 +767,78 @@ def _team_names(raw):
     return ", ".join(esc(n) for n in _parse_team(raw))
 
 
-def render_index(matches, roster, who=None, trial=False, seed_map=None):
-    data = compute_stats(matches, roster, seed_map=seed_map)
+def _board_table(data, heading):
+    """One leaderboard table for a single format. Lists ALL players (even at 0
+    games); shows the empty message only when the roster is genuinely empty."""
     lb = data["leaderboard"]
-
-    if lb and any(s["games"] > 0 for s in lb):
-        rows = []
-        for i, s in enumerate(lb, start=1):
-            crown = " &#128081;" if s["weeks_at_top"] > 0 and i == 1 else ""
-            rows.append(
-                "<tr>"
-                f"<td class='rank'>{i}</td>"
-                f"<td><a href='/player?name={urllib.parse.quote(s['name'])}'>{esc(s['name'])}</a>{crown}</td>"
-                f"<td class='elo'>{round(s['elo'])}</td>"
-                f"<td class='muted'>{round(s['peak'])}</td>"
-                f"<td>{s['wins']}-{s['losses']}</td>"
-                f"<td>{s['win_pct']:.0f}%</td>"
-                f"<td class='crown'>{s['weeks_at_top']}</td>"
-                f"<td>{esc(s['streak'])}</td>"
-                f"<td>{s['games']}</td>"
-                "</tr>"
-            )
-        table = (
-            "<table><thead><tr>"
-            "<th>#</th><th>Player</th><th>ELO</th><th>Peak</th><th>W-L</th><th>Win%</th>"
-            "<th>Weeks #1</th><th>Streak</th><th>Games</th>"
-            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    if not lb:
+        return (f"<h2>{heading}</h2><div class='card muted'>No players yet — "
+                "register on the login page.</div>")
+    rows = []
+    for i, s in enumerate(lb, start=1):
+        crown = " &#128081;" if s["weeks_at_top"] > 0 and i == 1 else ""
+        rows.append(
+            "<tr>"
+            f"<td class='rank'>{i}</td>"
+            f"<td><a href='/player?name={urllib.parse.quote(s['name'])}'>{esc(s['name'])}</a>{crown}</td>"
+            f"<td class='elo'>{round(s['elo'])}</td>"
+            f"<td class='muted'>{round(s['peak'])}</td>"
+            f"<td>{s['wins']}-{s['losses']}</td>"
+            f"<td>{s['win_pct']:.0f}%</td>"
+            f"<td class='crown'>{s['weeks_at_top']}</td>"
+            f"<td>{esc(s['streak'])}</td>"
+            f"<td>{s['games']}</td>"
+            "</tr>"
         )
-    else:
-        table = "<div class='card muted'>No matches recorded yet. " \
-                "<a href='/record'>Record the first match!</a></div>"
+    return (
+        f"<h2>{heading}</h2><table><thead><tr>"
+        "<th>#</th><th>Player</th><th>ELO</th><th>Peak</th><th>W-L</th><th>Win%</th>"
+        "<th>Weeks #1</th><th>Streak</th><th>Games</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
 
-    matches_feed = list(reversed(data["matches"]))[:15]
-    if matches_feed:
-        items = []
-        for m in matches_feed:
-            a = _team_names(m.get("team_a"))
-            b = _team_names(m.get("team_b"))
-            sa, sb = m.get("score_a"), m.get("score_b")
-            try:
-                a_won = int(sa) > int(sb)
-            except (TypeError, ValueError):
-                a_won = True
-            a_cls = "win" if a_won else "loss"
-            b_cls = "loss" if a_won else "win"
-            when = esc((m.get("timestamp_iso") or "")[:16].replace("T", " "))
-            tag = ("<span class='tag-trial'>trial</span>"
-                   if _is_trial_id(m.get("id")) else "")
-            items.append(
-                f"<li><span class='{a_cls}'>{a}</span> "
-                f"<strong>{esc(sa)}–{esc(sb)}</strong> "
-                f"<span class='{b_cls}'>{b}</span> "
-                f"<span class='muted'>({esc(m.get('format',''))}, {when})</span>{tag}</li>"
-            )
-        feed = "<h2>Recent matches</h2><ul class='feed'>" + "".join(items) + "</ul>"
-    else:
-        feed = ""
 
+def _recent_feed(matches):
+    """Combined recent-matches feed across both formats (latest ~15)."""
+    ordered = sorted(matches or [],
+                     key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
+    ordered = list(reversed(ordered))[:15]
+    if not ordered:
+        return "<h2>Recent matches</h2><p class='muted'>No matches recorded yet.</p>"
+    items = []
+    for m in ordered:
+        a = _team_names(m.get("team_a"))
+        b = _team_names(m.get("team_b"))
+        sa, sb = m.get("score_a"), m.get("score_b")
+        try:
+            a_won = int(sa) > int(sb)
+        except (TypeError, ValueError):
+            a_won = True
+        a_cls = "win" if a_won else "loss"
+        b_cls = "loss" if a_won else "win"
+        when = esc((m.get("timestamp_iso") or "")[:16].replace("T", " "))
+        tag = ("<span class='tag-trial'>trial</span>"
+               if _is_trial_id(m.get("id")) else "")
+        items.append(
+            f"<li><span class='{a_cls}'>{a}</span> "
+            f"<strong>{esc(sa)}–{esc(sb)}</strong> "
+            f"<span class='{b_cls}'>{b}</span> "
+            f"<span class='muted'>({esc(m.get('format',''))}, {when})</span>{tag}</li>"
+        )
+    return "<h2>Recent matches</h2><ul class='feed'>" + "".join(items) + "</ul>"
+
+
+def render_index(matches, roster, who=None, trial=False,
+                 seed_singles=None, seed_doubles=None):
+    singles = compute_stats(matches, roster, seed_map=seed_singles, fmt="1v1")
+    doubles = compute_stats(matches, roster, seed_map=seed_doubles, fmt="2v2")
     controls = sample_controls_html() if trial else ""
-    body = "<h1>Leaderboard</h1>" + controls + table + feed
+    body = (
+        "<h1>Leaderboards</h1>" + controls +
+        _board_table(singles, "Singles (1v1)") +
+        _board_table(doubles, "Doubles (2v2)") +
+        _recent_feed(matches)
+    )
     return base_page("Foosball Tracker", body, who, trial=trial)
 
 
@@ -813,10 +850,16 @@ def render_login(roster, who=None, trial=False):
         "<label for='name'>Your name</label>"
         "<input type='text' id='name' name='name' list='players' data-roster autocomplete='off' required autofocus>"
         + datalist_html("players", roster) +
-        "<label for='seed_elo'>Starting ELO "
-        "<span class='muted'>(new players only — ignored if you already exist)</span></label>"
-        f"<input type='number' id='seed_elo' name='seed_elo' value='{DEFAULT_SEED}' "
-        f"min='{SEED_MIN}' max='{SEED_MAX}'>"
+        "<p class='muted' style='margin-top:12px'>Starting ELOs — new players "
+        "only; ignored if you already exist. Singles and Doubles are separate.</p>"
+        "<div class='row2'>"
+        "<div><label for='seed_singles'>Singles starting ELO</label>"
+        f"<input type='number' id='seed_singles' name='seed_singles' value='{DEFAULT_SEED}' "
+        f"min='{SEED_MIN}' max='{SEED_MAX}'></div>"
+        "<div><label for='seed_doubles'>Doubles starting ELO</label>"
+        f"<input type='number' id='seed_doubles' name='seed_doubles' value='{DEFAULT_SEED}' "
+        f"min='{SEED_MIN}' max='{SEED_MAX}'></div>"
+        "</div>"
         "<button class='btn' type='submit'>Continue</button>"
         "</form>"
         "<form class='card' method='get' action='/trial'>"
@@ -889,24 +932,63 @@ def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=Fa
     return base_page("Record — Foosball Tracker", body, who, trial=trial)
 
 
-def render_player(matches, roster, name, who=None, trial=False, seed_map=None):
-    data = compute_stats(matches, roster, seed_map=seed_map)
+def _zero_stat(name, seed):
+    return {"name": name, "elo": float(seed), "peak": float(seed), "wins": 0,
+            "losses": 0, "games": 0, "win_pct": 0.0, "streak": "-",
+            "weeks_at_top": 0, "longest_reign": 0, "current_reign": 0}
+
+
+def _player_stat_block(heading, stat):
+    reign_detail = ""
+    if stat["weeks_at_top"] > 0:
+        reign_detail = (f" &nbsp;<span class='muted'>(longest reign "
+                        f"{stat['longest_reign']}, current {stat['current_reign']})</span>")
+    return (
+        "<div class='card'>"
+        f"<h3 style='margin-top:0'>{heading}</h3>"
+        f"<p><span class='elo' style='font-size:1.6rem'>{round(stat['elo'])}</span> "
+        "<span class='muted'>ELO</span> &nbsp;·&nbsp; "
+        f"<span class='muted'>peak</span> <strong>{round(stat['peak'])}</strong></p>"
+        f"<p><strong>{stat['wins']}-{stat['losses']}</strong> "
+        f"({stat['win_pct']:.0f}% win) &nbsp;·&nbsp; "
+        f"{stat['games']} games &nbsp;·&nbsp; "
+        f"streak {esc(stat['streak'])}</p>"
+        f"<p>Weeks at #1: <span class='crown'>{stat['weeks_at_top']}</span>"
+        f"{reign_detail}</p>"
+        "</div>"
+    )
+
+
+def render_player(matches, roster, name, who=None, trial=False,
+                  seed_singles=None, seed_doubles=None):
+    singles = compute_stats(matches, roster, seed_map=seed_singles, fmt="1v1")
+    doubles = compute_stats(matches, roster, seed_map=seed_doubles, fmt="2v2")
     key = name.strip().lower()
-    stat = None
-    canonical = name
-    for n, s in data["players"].items():
-        if n.strip().lower() == key:
-            stat = s
-            canonical = n
+
+    canonical = None
+    for pool in (singles["players"], doubles["players"]):
+        for n in pool:
+            if n.strip().lower() == key:
+                canonical = n
+                break
+        if canonical:
             break
-    if stat is None:
+    if canonical is None:
         body = ("<h1>Unknown player</h1>"
                 f"<p class='muted'>No player named “{esc(name)}”.</p>"
                 "<p><a href='/'>&larr; Back to leaderboard</a></p>")
         return base_page("Player — Foosball Tracker", body, who, trial=trial), 404
 
+    s_seed = (seed_singles or {}).get(canonical, DEFAULT_SEED)
+    d_seed = (seed_doubles or {}).get(canonical, DEFAULT_SEED)
+    s_stat = singles["players"].get(canonical, _zero_stat(canonical, s_seed))
+    d_stat = doubles["players"].get(canonical, _zero_stat(canonical, d_seed))
+
+    # Combined match history (both formats), most recent first.
+    all_matches = sorted(matches or [],
+                         key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     hist = []
-    for m in reversed(data["matches"]):
+    for m in reversed(all_matches):
         team_a = _parse_team(m.get("team_a"))
         team_b = _parse_team(m.get("team_b"))
         low_a = [x.lower() for x in team_a]
@@ -948,25 +1030,14 @@ def render_player(matches, roster, name, who=None, trial=False, seed_map=None):
     else:
         hist_table = "<p class='muted'>No matches played yet.</p>"
 
-    reign_detail = ""
-    if stat["weeks_at_top"] > 0:
-        reign_detail = (f" &nbsp;<span class='muted'>(longest reign "
-                        f"{stat['longest_reign']}, current {stat['current_reign']})</span>")
-    summary = (
-        "<div class='card'>"
-        f"<p><span class='elo' style='font-size:1.6rem'>{round(stat['elo'])}</span> "
-        "<span class='muted'>ELO</span> &nbsp;·&nbsp; "
-        f"<span class='muted'>peak</span> <strong>{round(stat['peak'])}</strong></p>"
-        f"<p><strong>{stat['wins']}-{stat['losses']}</strong> "
-        f"({stat['win_pct']:.0f}% win) &nbsp;·&nbsp; "
-        f"{stat['games']} games &nbsp;·&nbsp; "
-        f"streak {esc(stat['streak'])}</p>"
-        f"<p>Weeks at #1: <span class='crown'>{stat['weeks_at_top']}</span>"
-        f"{reign_detail}</p>"
-        "</div>"
+    blocks = (
+        "<div class='row2'>"
+        + _player_stat_block("Singles (1v1)", s_stat)
+        + _player_stat_block("Doubles (2v2)", d_stat)
+        + "</div>"
     )
     body = (
-        f"<h1>{esc(canonical)}</h1>" + summary + hist_table +
+        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table +
         "<p style='margin-top:16px'><a href='/'>&larr; Back to leaderboard</a></p>"
     )
     return base_page(f"{canonical} — Foosball Tracker", body, who, trial=trial), 200

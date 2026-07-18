@@ -68,7 +68,7 @@ def _now_iso():
 
 
 def _seed_int(value):
-    """Parse a seed_elo cell -> int. Missing/blank/invalid (old 2-col rows) -> default."""
+    """Parse a seed cell -> int. Missing/blank/invalid -> default."""
     try:
         s = str(value).strip()
         return int(s) if s else DEFAULT_SEED
@@ -77,12 +77,28 @@ def _seed_int(value):
 
 
 def _normalize_players(rows):
-    """Keep rows with a name; expose seed_elo as an int (backward compatible)."""
+    """
+    Keep named rows; expose seed_singles + seed_doubles as ints. Tolerates all
+    three historical shapes (DictReader keys depend on the file's header):
+      * 2-col  name,created_at              -> both seeds = default
+      * 3-col  name,created_at,seed_elo     -> legacy single seed for BOTH tracks
+      * 4-col  name,created_at,seed_singles,seed_doubles -> read both
+    """
     out = []
     for r in rows:
         if not r.get("name"):
             continue
-        r["seed_elo"] = _seed_int(r.get("seed_elo"))
+        has_split = ("seed_singles" in r) or ("seed_doubles" in r)
+        if has_split:
+            s_singles = _seed_int(r.get("seed_singles"))
+            s_doubles = _seed_int(r.get("seed_doubles"))
+        elif "seed_elo" in r:
+            legacy = _seed_int(r.get("seed_elo"))   # legacy single seed -> both
+            s_singles = s_doubles = legacy
+        else:
+            s_singles = s_doubles = DEFAULT_SEED
+        r["seed_singles"] = s_singles
+        r["seed_doubles"] = s_doubles
         out.append(r)
     return out
 
@@ -179,21 +195,22 @@ class LocalStore(Store):
         with open(self.matches_csv, "r", newline="", encoding="utf-8") as f:
             return [row for row in csv.DictReader(f) if row.get("id")]
 
-    def write_player(self, name, seed_elo=DEFAULT_SEED):
+    def write_player(self, name, seed_singles=DEFAULT_SEED, seed_doubles=DEFAULT_SEED):
         name = name.strip()
         if not name:
             raise ValueError("empty player name")
         with self._lock:
-            rows = self.read_players()  # normalized (seed_elo as int)
+            rows = self.read_players()  # normalized (seeds as ints)
             key = name.lower()
             for p in rows:
                 if (p.get("name") or "").strip().lower() == key:
-                    return p["name"]  # exists; seed unchanged, canonical form
+                    return p["name"]  # exists; seeds unchanged, canonical form
             rows.append({
-                "name": name, "created_at": _now_iso(), "seed_elo": int(seed_elo),
+                "name": name, "created_at": _now_iso(),
+                "seed_singles": int(seed_singles), "seed_doubles": int(seed_doubles),
             })
-            # Rewrite with the current header so pre-seed (2-column) files are
-            # transparently upgraded to include seed_elo.
+            # Rewrite with the canonical 4-column header so legacy (2/3-column)
+            # files are transparently upgraded and stay consistent.
             with open(self.players_csv, "w", newline="", encoding="utf-8") as f:
                 f.write(rows_to_csv(PLAYERS_HEADER, rows))
         self._git_commit(f"add player {name}")
@@ -328,20 +345,24 @@ class GitHubStore(Store):
         text, _sha = self._get_file(self.matches_path)
         return [r for r in parse_csv(text) if r.get("id")]
 
-    def write_player(self, name, seed_elo=DEFAULT_SEED):
+    def write_player(self, name, seed_singles=DEFAULT_SEED, seed_doubles=DEFAULT_SEED):
         name = name.strip()
         if not name:
             raise ValueError("empty player name")
 
         def mutate(rows):
+            # Normalize existing rows first so legacy (2/3-column) seeds are
+            # carried into the canonical 4-column rewrite instead of being lost.
+            rows = _normalize_players(rows)
             key = name.lower()
             for r in rows:
                 if (r.get("name") or "").strip().lower() == key:
-                    return (None, r["name"], None)  # exists; seed unchanged
+                    return (None, r["name"], None)  # exists; seeds unchanged
             new_rows = rows + [{
                 "name": name,
                 "created_at": _now_iso(),
-                "seed_elo": int(seed_elo),
+                "seed_singles": int(seed_singles),
+                "seed_doubles": int(seed_doubles),
             }]
             return (new_rows, name, f"add player {name}")
 

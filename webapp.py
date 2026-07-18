@@ -173,9 +173,11 @@ def handle(method, path, query, cookies, body, store):
     return _html(core.render_not_found(who, is_trial), 405)
 
 
-def _seed_map(players):
-    """{name: seed_elo(int)} from stored player rows (already normalized)."""
-    return {p["name"]: p.get("seed_elo", core.DEFAULT_SEED) for p in players}
+def _seed_maps(players):
+    """(singles_map, doubles_map): {name: seed(int)} per track (normalized rows)."""
+    singles = {p["name"]: p.get("seed_singles", core.DEFAULT_SEED) for p in players}
+    doubles = {p["name"]: p.get("seed_doubles", core.DEFAULT_SEED) for p in players}
+    return singles, doubles
 
 
 def _handle_get(path, query, store, who, trial, is_trial, extra):
@@ -183,8 +185,9 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         players = store.read_players()
         names = [p["name"] for p in players]
         matches = store.read_matches() + (extra or [])
+        s_map, d_map = _seed_maps(players)
         return _html(core.render_index(matches, names, who, is_trial,
-                                       seed_map=_seed_map(players)))
+                                       seed_singles=s_map, seed_doubles=d_map))
 
     if path == "/login":
         roster = core.roster_names(store.read_players(), extra)
@@ -218,8 +221,9 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         players = store.read_players()
         names = [p["name"] for p in players]
         matches = store.read_matches() + (extra or [])
+        s_map, d_map = _seed_maps(players)
         html_out, status = core.render_player(matches, names, name, who, is_trial,
-                                              seed_map=_seed_map(players))
+                                              seed_singles=s_map, seed_doubles=d_map)
         return _html(html_out, status)
 
     return _html(core.render_not_found(who, is_trial), 404)
@@ -242,15 +246,16 @@ def _post_login(form, store, trial):
     if not name:
         roster = core.roster_names(store.read_players())
         return _html(core.render_login(roster, None), 400)
-    # Parse the chosen starting ELO: non-numeric -> default; clamp to bounds.
+    # Parse both starting ELOs independently: non-numeric -> default; clamped.
     # Ignored by the store if the (case-insensitive) name already exists.
-    raw = (form.get("seed_elo", [""])[0]).strip()
-    try:
-        seed = int(raw)
-    except (TypeError, ValueError):
-        seed = core.DEFAULT_SEED
-    seed = max(core.SEED_MIN, min(core.SEED_MAX, seed))
-    canonical = store.write_player(name, seed)
+    def _seed(field):
+        try:
+            v = int((form.get(field, [""])[0]).strip())
+        except (TypeError, ValueError):
+            v = core.DEFAULT_SEED
+        return max(core.SEED_MIN, min(core.SEED_MAX, v))
+
+    canonical = store.write_player(name, _seed("seed_singles"), _seed("seed_doubles"))
     # A real login exits any trial session (clear the trial cookie).
     return _redirect("/", [_who_cookie(canonical), _clear_cookie("trial")])
 
@@ -318,10 +323,13 @@ def _post_record(form, store, who, trial, is_trial, extra):
             matches = matches[-TRIAL_MATCH_CAP:]  # drop oldest to bound size
         payload = dict(trial)
         payload["matches"] = matches
-        # Breakdown over the trial-layered ratings; re-set the trial cookie.
+        # Breakdown over the recorded format's track; re-set the trial cookie.
+        rec_fmt = core.match_format(matches[-1])
+        s_map, d_map = _seed_maps(players)
+        track_seed = s_map if rec_fmt == "1v1" else d_map
         all_matches = store.read_matches() + _trial_extra_matches(payload)
         bd = core.match_breakdown(all_matches, [p["name"] for p in players],
-                                  _seed_map(players), new_id)
+                                  track_seed, new_id, fmt=rec_fmt)
         return _html(core.render_breakdown(bd, who, trial=True),
                      cookies=[_trial_cookie(payload)])
 
@@ -337,10 +345,12 @@ def _post_record(form, store, who, trial, is_trial, extra):
         "score_b": score_b,
         "recorded_by": who,
     })
-    # Always show the result breakdown (old->new / role / X, doubles detail).
+    # Always show the result breakdown for the recorded format's track.
     players = store.read_players()
+    s_map, d_map = _seed_maps(players)
+    track_seed = s_map if fmt == "1v1" else d_map
     bd = core.match_breakdown(store.read_matches(), [p["name"] for p in players],
-                              _seed_map(players), new_id)
+                              track_seed, new_id, fmt=fmt)
     return _html(core.render_breakdown(bd, who, trial=False))
 
 
