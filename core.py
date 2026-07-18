@@ -742,37 +742,104 @@ table.matrix td.diag { background: #e5e7eb; }
   .muted, .rank { color: #9ca3af; }
   .error { background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }
 }
+
+/* ===== phone-first shell ===== */
+.shell { max-width: 480px; margin: 0 auto; padding: 18px 16px 24px; }
+.shell.has-tabs { padding-bottom: 92px; }
+h1 { font-size: 1.5rem; margin: 4px 0 14px; }
+.btn-lg {
+  display: block; width: 100%; box-sizing: border-box; text-align: center;
+  padding: 18px 16px; margin: 12px 0; min-height: 56px;
+  font-size: 1.15rem; font-weight: 700; border-radius: 14px;
+  background: #2563eb; color: #fff; border: none; cursor: pointer;
+  text-decoration: none; line-height: 1.3;
+}
+.btn-lg.secondary { background: #6b7280; }
+.btn-lg:active { filter: brightness(0.94); }
+.hub-greet { font-size: 1.5rem; font-weight: 700; margin: 14px 0 2px; }
+.hub-sub { color: #6b7280; margin: 0 0 22px; font-size: 0.95rem; }
+.backlink { display: inline-block; margin-bottom: 6px; color: #2563eb;
+  text-decoration: none; font-size: 1rem; padding: 8px 2px; min-height: 40px; }
+.seg { display: flex; width: 100%; border: 1px solid #cbd5e1; border-radius: 12px;
+  overflow: hidden; margin: 12px 0 16px; }
+.seg > * { flex: 1; text-align: center; padding: 13px 6px; min-height: 46px;
+  font-weight: 600; text-decoration: none; color: #2563eb; background: #fff;
+  cursor: pointer; border: none; font-size: 1rem; display: flex;
+  align-items: center; justify-content: center; }
+.seg > *.active, .seg-fmt label:has(input:checked) { background: #2563eb; color: #fff; }
+.seg > * + * { border-left: 1px solid #cbd5e1; }
+.seg-fmt input { position: absolute; opacity: 0; width: 0; height: 0; }
+.yourcard { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 14px;
+  padding: 14px 16px; margin: 4px 0 8px; }
+.yourcard h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.yourcard .track { display: flex; justify-content: space-between;
+  align-items: baseline; padding: 6px 0; }
+.yourcard .track b { font-size: 1.15rem; }
+.lb { display: flex; flex-direction: column; gap: 8px; }
+.lb-row { display: flex; align-items: center; gap: 12px; min-height: 52px;
+  padding: 10px 14px; border-radius: 12px; background: #fff; text-decoration: none;
+  color: inherit; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.lb-row .lb-rank { font-weight: 700; color: #6b7280; min-width: 1.6em; }
+.lb-row .lb-name { flex: 1; font-weight: 600; }
+.lb-row .lb-elo { font-weight: 700; font-size: 1.1rem; }
+.lb-row .lb-wl { color: #6b7280; font-size: 0.8rem; min-width: 3em; text-align: right; }
+.tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: flex; background: #fff; border-top: 1px solid #e5e7eb;
+  max-width: 480px; margin: 0 auto; }
+.tabbar a { flex: 1; text-align: center; padding: 8px 4px 10px; text-decoration: none;
+  color: #6b7280; font-size: 0.72rem; min-height: 56px; }
+.tabbar a .ic { display: block; font-size: 1.3rem; line-height: 1.5; }
+.tabbar a.active { color: #2563eb; font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  .hub-sub, .lb-row .lb-wl, .lb-row .lb-rank, .tabbar a { color: #9ca3af; }
+  .seg { border-color: #4b5563; }
+  .seg > * { background: #1f2937; color: #93c5fd; }
+  .seg > *.active, .seg-fmt label:has(input:checked) { background: #2563eb; color: #fff; }
+  .seg > * + * { border-color: #4b5563; }
+  .yourcard { background: #172033; border-color: #1e3a5f; }
+  .lb-row { background: #1f2937; box-shadow: none; }
+  .tabbar { background: #1f2937; border-color: #374151; }
+}
 """
 
 
-def base_page(title, body, who=None, trial=False):
-    if who:
-        label = "Trial as" if trial else "Playing as"
-        who_html = (
-            f'<span class="who">{label}: <strong>{esc(who)}</strong></span> '
-            f'&nbsp;<a href="/record">Record</a> &nbsp;<a href="/logout">Logout</a>'
-        )
-    else:
-        who_html = ('<a href="/login">Pick your name</a> '
-                    '&nbsp;<a href="/trial">&#129514; Try it out</a>')
+def _tab_bar(active):
+    """Fixed bottom tab bar for the Check-scores section (Board/Matrix/History)."""
+    tabs = [
+        ("board", "/scores", "&#128202;", "Board"),
+        ("matrix", "/matrix", "&#128200;", "Matrix"),
+        ("history", "/history", "&#128340;", "History"),
+    ]
+    links = "".join(
+        f"<a class='{'active' if key == active else ''}' href='{href}'>"
+        f"<span class='ic'>{ic}</span>{label}</a>"
+        for key, href, ic, label in tabs)
+    return f"<nav class='tabbar'>{links}</nav>"
+
+
+def base_page(title, body, who=None, trial=False, tabs=None):
+    """
+    Minimal phone-first shell: a centered max-width column, an optional trial
+    banner, and (on the Check-scores routes) a fixed bottom tab bar. The old
+    dense top nav is gone — navigation is home-hub buttons + bottom tabs + back
+    links rendered inside each page's body. `who` is accepted for call
+    compatibility but no longer drives any chrome.
+    """
     banner = ""
     if trial:
         banner = (
             "<div class='trialbar'>&#129514; TRIAL MODE — matches you record here "
             "are private to you and are deleted when you log out.</div>"
         )
+    shell_cls = "shell has-tabs" if tabs else "shell"
+    tabbar = _tab_bar(tabs) if tabs else ""
     return (
         "<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{esc(title)}</title><style>{PAGE_CSS}</style></head><body>"
-        "<header class='topbar'><div class='inner'>"
-        "<span class='brand'><a href='/' style='color:#fff'>&#9917; Foosball Tracker</a>"
-        " &nbsp;<a href='/history' style='font-size:0.9rem'>History</a>"
-        " &nbsp;<a href='/matrix' style='font-size:0.9rem'>Matrix</a></span>"
-        f"<span>{who_html}</span>"
-        "</div></header>"
         f"{banner}"
-        f"<div class='container'>{body}</div>"
+        f"<div class='{shell_cls}'>{body}</div>"
+        f"{tabbar}"
         "</body></html>"
     )
 
@@ -868,35 +935,25 @@ def _team_names(raw):
     return ", ".join(esc(n) for n in _parse_team(raw))
 
 
-def _board_table(data, heading):
-    """One leaderboard table for a single format. Lists ALL players (even at 0
-    games); shows the empty message only when the roster is genuinely empty."""
+def _compact_board(data):
+    """Slim, tap-through leaderboard: rank · name · ELO · small W-L. Lists ALL
+    players (even 0 games); empty only when the roster is genuinely empty."""
     lb = data["leaderboard"]
     if not lb:
-        return (f"<h2>{heading}</h2><div class='card muted'>No players yet — "
-                "register on the login page.</div>")
+        return ("<p class='muted'>No players yet — enter your name on the home "
+                "screen to get started.</p>")
     rows = []
     for i, s in enumerate(lb, start=1):
         crown = " &#128081;" if s["weeks_at_top"] > 0 and i == 1 else ""
         rows.append(
-            "<tr>"
-            f"<td class='rank'>{i}</td>"
-            f"<td><a href='/player?name={urllib.parse.quote(s['name'])}'>{esc(s['name'])}</a>{crown}</td>"
-            f"<td class='elo'>{round(s['elo'])}</td>"
-            f"<td class='muted'>{round(s['peak'])}</td>"
-            f"<td>{s['wins']}-{s['losses']}</td>"
-            f"<td>{s['win_pct']:.0f}%</td>"
-            f"<td class='crown'>{s['weeks_at_top']}</td>"
-            f"<td>{esc(s['streak'])}</td>"
-            f"<td>{s['games']}</td>"
-            "</tr>"
+            f"<a class='lb-row' href='/player?name={urllib.parse.quote(s['name'])}'>"
+            f"<span class='lb-rank'>{i}</span>"
+            f"<span class='lb-name'>{esc(s['name'])}{crown}</span>"
+            f"<span class='lb-elo'>{round(s['elo'])}</span>"
+            f"<span class='lb-wl'>{s['wins']}-{s['losses']}</span>"
+            "</a>"
         )
-    return (
-        f"<h2>{heading}</h2><table><thead><tr>"
-        "<th>#</th><th>Player</th><th>ELO</th><th>Peak</th><th>W-L</th><th>Win%</th>"
-        "<th>Weeks #1</th><th>Streak</th><th>Games</th>"
-        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
-    )
+    return "<div class='lb'>" + "".join(rows) + "</div>"
 
 
 def _match_controls(m, editable):
@@ -921,47 +978,68 @@ def _match_controls(m, editable):
     )
 
 
-def _recent_feed(matches, editable=False):
-    """Combined recent-matches feed across both formats (latest ~15)."""
-    ordered = sorted(matches or [],
-                     key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
-    ordered = list(reversed(ordered))[:15]
-    if not ordered:
-        return "<h2>Recent matches</h2><p class='muted'>No matches recorded yet.</p>"
-    items = []
-    for m in ordered:
-        a = _team_names(m.get("team_a"))
-        b = _team_names(m.get("team_b"))
-        sa, sb = m.get("score_a"), m.get("score_b")
-        try:
-            a_won = int(sa) > int(sb)
-        except (TypeError, ValueError):
-            a_won = True
-        a_cls = "win" if a_won else "loss"
-        b_cls = "loss" if a_won else "win"
-        when = esc((m.get("timestamp_iso") or "")[:16].replace("T", " "))
-        items.append(
-            f"<li><span class='{a_cls}'>{a}</span> "
-            f"<strong>{esc(sa)}–{esc(sb)}</strong> "
-            f"<span class='{b_cls}'>{b}</span> "
-            f"<span class='muted'>({esc(m.get('format',''))}, {when})</span> "
-            f"{_match_controls(m, editable)}</li>"
-        )
-    return "<h2>Recent matches</h2><ul class='feed'>" + "".join(items) + "</ul>"
+def render_home(who, trial=False):
+    """Logged-in hub: greeting + two big buttons. Nothing else."""
+    body = (
+        f"<p class='hub-greet'>Hi, {esc(who)} &#128075;</p>"
+        f"<p class='hub-sub'>Playing as <strong>{esc(who)}</strong> &nbsp;·&nbsp; "
+        "<a href='/logout'>Log out / switch</a></p>"
+        "<a class='btn-lg' href='/scores'>&#128202; Check scores</a>"
+        "<a class='btn-lg' href='/record'>&#10133; Record a match</a>"
+    )
+    return base_page("Foosball Tracker", body, trial=trial)
 
 
-def render_index(matches, roster, who=None, trial=False,
-                 seed_singles=None, seed_doubles=None):
+def _rank_and_stat(data, name):
+    """Return (rank, stat) of `name` in a board leaderboard, or (None, None)."""
+    key = (name or "").strip().lower()
+    for i, s in enumerate(data["leaderboard"], start=1):
+        if s["name"].strip().lower() == key:
+            return i, s
+    return None, None
+
+
+def render_scores(matches, roster, who, board="singles", trial=False,
+                  seed_singles=None, seed_doubles=None):
+    """Board tab: your card, Singles/Doubles toggle, compact tap-through board."""
     singles = compute_stats(matches, roster, seed_map=seed_singles, fmt="1v1")
     doubles = compute_stats(matches, roster, seed_map=seed_doubles, fmt="2v2")
+    board = "doubles" if board == "doubles" else "singles"
+
+    s_rank, s_stat = _rank_and_stat(singles, who)
+    d_rank, d_stat = _rank_and_stat(doubles, who)
+
+    def track(label, rank, stat):
+        if stat is None:
+            return (f"<div class='track'><span>{label}</span>"
+                    "<span class='muted'>not played yet</span></div>")
+        return (f"<div class='track'><span>{label} "
+                f"<span class='muted'>#{rank}</span></span>"
+                f"<span><b>{round(stat['elo'])}</b> "
+                f"<span class='muted'>({stat['wins']}-{stat['losses']})</span></span></div>")
+
+    your_card = (
+        "<div class='yourcard'>"
+        f"<h2>You — {esc(who)}</h2>"
+        + track("Singles", s_rank, s_stat)
+        + track("Doubles", d_rank, d_stat)
+        + "</div>"
+    )
+
+    seg = (
+        "<div class='seg'>"
+        f"<a class='{'active' if board == 'singles' else ''}' href='/scores?board=singles'>Singles</a>"
+        f"<a class='{'active' if board == 'doubles' else ''}' href='/scores?board=doubles'>Doubles</a>"
+        "</div>"
+    )
+    board_data = singles if board == "singles" else doubles
     controls = sample_controls_html() if trial else ""
     body = (
-        "<h1>Leaderboards</h1>" + controls +
-        _board_table(singles, "Singles (1v1)") +
-        _board_table(doubles, "Doubles (2v2)") +
-        _recent_feed(matches, editable=not trial)
+        "<a class='backlink' href='/'>&#8249; Home</a>"
+        "<h1>Scores</h1>" + your_card + seg
+        + _compact_board(board_data) + controls
     )
-    return base_page("Foosball Tracker", body, who, trial=trial)
+    return base_page("Scores — Foosball Tracker", body, trial=trial, tabs="board")
 
 
 def render_history(matches, who=None, trial=False):
@@ -970,10 +1048,13 @@ def render_history(matches, who=None, trial=False):
     ordered = sorted(matches or [],
                      key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     ordered = list(reversed(ordered))
+    home = "<a class='backlink' href='/'>&#8249; Home</a>"
+    controls = sample_controls_html() if trial else ""
     if not ordered:
-        body = ("<h1>Match history</h1><p class='muted'>No matches recorded yet. "
+        body = (home + "<h1>Match history</h1>" + controls +
+                "<p class='muted'>No matches recorded yet. "
                 "<a href='/record'>Record the first match!</a></p>")
-        return base_page("History — Foosball Tracker", body, who, trial=trial)
+        return base_page("History — Foosball Tracker", body, trial=trial, tabs="history")
 
     rows = []
     for m in ordered:
@@ -1003,43 +1084,42 @@ def render_history(matches, who=None, trial=False):
     )
     note = ("<p class='muted'>Trial/sample rows are marked “trial” and can't be "
             "edited (they're not saved).</p>") if trial else ""
-    body = "<h1>Match history</h1>" + table + note
-    return base_page("History — Foosball Tracker", body, who, trial=trial)
+    body = home + "<h1>Match history</h1>" + controls + table + note
+    return base_page("History — Foosball Tracker", body, trial=trial, tabs="history")
 
 
 def render_login(roster, who=None, trial=False):
+    """Logged-out home: one clean screen — name + Enter, seeds tucked away."""
     body = (
-        "<h1>Pick your name</h1>"
-        "<form class='card' method='post' action='/login'>"
-        "<p class='muted'>No password — honor system. Type a new name or pick an existing one.</p>"
+        "<h1>&#127955; Foosball Tracker</h1>"
+        "<p class='hub-sub'>Type your name to check scores or record a match. "
+        "No password — honor system.</p>"
+        "<form method='post' action='/login'>"
         "<label for='name'>Your name</label>"
-        "<input type='text' id='name' name='name' list='players' data-roster autocomplete='off' required autofocus>"
+        "<input type='text' id='name' name='name' list='players' data-roster "
+        "autocomplete='off' required autofocus>"
         + datalist_html("players", roster) +
-        "<p class='muted' style='margin-top:12px'>Starting ELOs — new players "
-        "only; ignored if you already exist. Singles and Doubles are separate.</p>"
+        "<details style='margin:12px 0'>"
+        "<summary style='cursor:pointer;color:#2563eb;padding:6px 0'>"
+        "New here? Set starting ELO</summary>"
+        "<p class='muted' style='margin:8px 0 4px'>New players only; ignored if "
+        "you already exist. Singles &amp; Doubles are separate.</p>"
         "<div class='row2'>"
-        "<div><label for='seed_singles'>Singles starting ELO</label>"
+        "<div><label for='seed_singles'>Singles</label>"
         f"<input type='number' id='seed_singles' name='seed_singles' value='{DEFAULT_SEED}' "
-        f"min='{SEED_MIN}' max='{SEED_MAX}'></div>"
-        "<div><label for='seed_doubles'>Doubles starting ELO</label>"
+        f"min='{SEED_MIN}' max='{SEED_MAX}' inputmode='numeric'></div>"
+        "<div><label for='seed_doubles'>Doubles</label>"
         f"<input type='number' id='seed_doubles' name='seed_doubles' value='{DEFAULT_SEED}' "
-        f"min='{SEED_MIN}' max='{SEED_MAX}'></div>"
+        f"min='{SEED_MIN}' max='{SEED_MAX}' inputmode='numeric'></div>"
         "</div>"
-        "<button class='btn' type='submit'>Continue</button>"
+        "</details>"
+        "<button class='btn-lg' type='submit'>Enter</button>"
         "</form>"
-        "<form class='card' method='get' action='/trial'>"
-        "<h2 style='margin-top:0'>&#129514; Try it out (trial mode)</h2>"
-        "<p class='muted'>Experiment in a private sandbox: you see the real "
-        "leaderboard as a base and can record matches to play around. Trial "
-        "matches are visible only to you, never saved to disk, and deleted "
-        "when you log out.</p>"
-        "<label for='trialname'>Trial name</label>"
-        "<input type='text' id='trialname' name='name' value='Guest' autocomplete='off'>"
-        "<button class='btn secondary' type='submit'>Enter trial mode</button>"
-        "</form>"
+        "<p style='text-align:center;margin-top:18px'>"
+        "<a href='/trial'>Just browsing? &#129514; Try it out</a></p>"
         + roster_autocomplete_script(roster)
     )
-    return base_page("Login — Foosball Tracker", body, who, trial=trial)
+    return base_page("Foosball Tracker", body, trial=trial)
 
 
 def _did_you_mean_html(flags):
@@ -1098,9 +1178,9 @@ def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match
         f"<form id='matchform' class='card' method='post' action='{esc(action)}'>"
         + hidden + confirm_hidden + _did_you_mean_html(flags) +
         "<label>Format</label>"
-        "<div class='toggle'>"
-        f"<label><input type='radio' name='format' value='1v1' {checked_1} onclick='setFmt(false)'> 1v1</label>"
-        f"<label><input type='radio' name='format' value='2v2' {checked_2} onclick='setFmt(true)'> 2v2</label>"
+        "<div class='seg seg-fmt'>"
+        f"<label><input type='radio' name='format' value='1v1' {checked_1} onclick='setFmt(false)'>1v1</label>"
+        f"<label><input type='radio' name='format' value='2v2' {checked_2} onclick='setFmt(true)'>2v2</label>"
         "</div>"
         "<div class='row2'>"
         "<div>"
@@ -1117,11 +1197,11 @@ def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match
         "</div>"
         "</div>"
         "<div class='row2'>"
-        f"<div><label>Score A</label><input type='number' name='score_a' min='0' value='{val('score_a')}' required></div>"
-        f"<div><label>Score B</label><input type='number' name='score_b' min='0' value='{val('score_b')}' required></div>"
+        f"<div><label>Score A</label><input type='number' name='score_a' min='0' inputmode='numeric' value='{val('score_a')}' required></div>"
+        f"<div><label>Score B</label><input type='number' name='score_b' min='0' inputmode='numeric' value='{val('score_b')}' required></div>"
         "</div>"
         + dl +
-        f"<button class='btn' type='submit'>{esc(submit_label)}</button>"
+        f"<button class='btn-lg' type='submit'>{esc(submit_label)}</button>"
         "</form>"
         "<script>"
         "function setFmt(is2v2){"
@@ -1140,10 +1220,11 @@ def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=Fa
                   flags=None, confirmed=None):
     err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
     controls = sample_controls_html() if trial else ""
-    body = ("<h1>Record a match</h1>" + err_html + controls
-            + _match_form("/record", roster, fmt, values, "Save match",
+    body = ("<a class='backlink' href='/'>&#8249; Home</a>"
+            "<h1>Record a match</h1>" + err_html + controls
+            + _match_form("/record", roster, fmt, values, "Record",
                           flags=flags, confirmed=confirmed))
-    return base_page("Record — Foosball Tracker", body, who, trial=trial)
+    return base_page("Record — Foosball Tracker", body, trial=trial)
 
 
 def render_edit(roster, match_id, who=None, error=None, fmt="1v1", values=None,
@@ -1151,12 +1232,12 @@ def render_edit(roster, match_id, who=None, error=None, fmt="1v1", values=None,
     err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
     hidden = f"<input type='hidden' name='id' value='{esc(match_id)}'>"
     body = (
+        "<a class='backlink' href='/history'>&#8249; Back to history</a>"
         f"<h1>Edit match #{esc(match_id)}</h1>" + err_html
         + _match_form("/edit", roster, fmt, values, "Save changes", hidden=hidden,
                       flags=flags, confirmed=confirmed)
-        + "<p style='margin-top:12px'><a href='/history'>&larr; Back to history</a></p>"
     )
-    return base_page("Edit match — Foosball Tracker", body, who, trial=trial)
+    return base_page("Edit match — Foosball Tracker", body, trial=trial)
 
 
 def match_values(m):
@@ -1216,10 +1297,10 @@ def render_player(matches, roster, name, who=None, trial=False,
         if canonical:
             break
     if canonical is None:
-        body = ("<h1>Unknown player</h1>"
-                f"<p class='muted'>No player named “{esc(name)}”.</p>"
-                "<p><a href='/'>&larr; Back to leaderboard</a></p>")
-        return base_page("Player — Foosball Tracker", body, who, trial=trial), 404
+        body = ("<a class='backlink' href='/scores'>&#8249; Back</a>"
+                "<h1>Unknown player</h1>"
+                f"<p class='muted'>No player named “{esc(name)}”.</p>")
+        return base_page("Player — Foosball Tracker", body, trial=trial), 404
 
     s_seed = (seed_singles or {}).get(canonical, DEFAULT_SEED)
     d_seed = (seed_doubles or {}).get(canonical, DEFAULT_SEED)
@@ -1279,10 +1360,10 @@ def render_player(matches, roster, name, who=None, trial=False,
         + "</div>"
     )
     body = (
-        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table +
-        "<p style='margin-top:16px'><a href='/'>&larr; Back to leaderboard</a></p>"
+        "<a class='backlink' href='/scores'>&#8249; Back</a>"
+        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table
     )
-    return base_page(f"{canonical} — Foosball Tracker", body, who, trial=trial), 200
+    return base_page(f"{canonical} — Foosball Tracker", body, trial=trial), 200
 
 
 def _heat_color(pct):
@@ -1371,16 +1452,14 @@ def render_matrix(matches, roster=None, who=None, trial=False):
               "&rarr; <span style='color:hsl(120,62%,42%)'>&#9632;</span> high.</p>")
 
     body = (
+        "<a class='backlink' href='/'>&#8249; Home</a>"
         "<h1>Correlation matrices</h1>" + legend +
         "<h2>Partner synergy (2v2)</h2>" + syn_table +
-        "<div class='row2' style='margin-top:12px'>"
         f"<div class='card'>{best_html}</div>"
         f"<div class='card'>{worst_html}</div>"
-        "</div>"
-        "<h2 style='margin-top:24px'>Head-to-head</h2>" + h2h_table +
-        "<p style='margin-top:16px'><a href='/'>&larr; Back to leaderboard</a></p>"
+        "<h2 style='margin-top:24px'>Head-to-head</h2>" + h2h_table
     )
-    return base_page("Matrix — Foosball Tracker", body, who, trial=trial)
+    return base_page("Matrix — Foosball Tracker", body, trial=trial, tabs="matrix")
 
 
 def render_breakdown(bd, who=None, trial=False):
@@ -1388,8 +1467,9 @@ def render_breakdown(bd, who=None, trial=False):
     if bd is None:
         return base_page("Match recorded",
                          "<h1>Match recorded</h1>"
-                         "<p><a href='/'>&larr; Back to leaderboard</a></p>",
-                         who, trial=trial)
+                         "<a class='btn-lg' href='/scores'>&#128202; See the board</a>"
+                         "<p style='text-align:center'><a href='/'>&#8249; Home</a></p>",
+                         trial=trial)
 
     a_names = ", ".join(esc(n) for n in bd["team_a"])
     b_names = ", ".join(esc(n) for n in bd["team_b"])
@@ -1439,15 +1519,17 @@ def render_breakdown(bd, who=None, trial=False):
     )
 
     body = (
-        f"<h1>{esc(title)}</h1>" + detail + table +
-        "<p style='margin-top:16px'><a class='btn' href='/'>Back to leaderboard</a></p>"
+        f"<h1>{esc(title)}</h1>" + detail + table
+        + "<a class='btn-lg' href='/scores'>&#128202; See the board</a>"
+        + "<a class='btn-lg secondary' href='/record'>&#10133; Record another</a>"
+        + "<p style='text-align:center;margin-top:6px'><a href='/'>&#8249; Home</a></p>"
     )
-    return base_page(title, body, who, trial=trial)
+    return base_page(title, body, trial=trial)
 
 
 def render_not_found(who=None, trial=False):
     return base_page(
         "Not found",
         "<h1>404</h1><p>No such page. <a href='/'>Home</a></p>",
-        who, trial=trial,
+        trial=trial,
     )

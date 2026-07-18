@@ -181,17 +181,15 @@ def _seed_maps(players):
 
 
 def _handle_get(path, query, store, who, trial, is_trial, extra):
+    # --- Pre-auth routes (available logged out) ---
     if path == "/":
-        players = store.read_players()
-        names = [p["name"] for p in players]
-        matches = store.read_matches() + (extra or [])
-        s_map, d_map = _seed_maps(players)
-        return _html(core.render_index(matches, names, who, is_trial,
-                                       seed_singles=s_map, seed_doubles=d_map))
+        if who:
+            return _html(core.render_home(who, is_trial))
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_login(roster))
 
     if path == "/login":
-        roster = core.roster_names(store.read_players(), extra)
-        return _html(core.render_login(roster, who, is_trial))
+        return _redirect("/")   # the login screen now lives at /
 
     if path == "/trial":
         q = urllib.parse.parse_qs(query)
@@ -202,14 +200,27 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
     if path == "/logout":
         return _redirect("/", [_clear_cookie("who"), _clear_cookie("trial")])
 
+    # --- Everything below is behind "enter your name" (login or trial) ---
+    if not who:
+        return _redirect("/")
+
+    if path == "/scores":
+        q = urllib.parse.parse_qs(query)
+        board = (q.get("board", ["singles"])[0]).strip().lower()
+        players = store.read_players()
+        names = [p["name"] for p in players]
+        matches = store.read_matches() + (extra or [])
+        s_map, d_map = _seed_maps(players)
+        return _html(core.render_scores(matches, names, who, board=board,
+                                        trial=is_trial, seed_singles=s_map,
+                                        seed_doubles=d_map))
+
     if path == "/matrix":
         matches = store.read_matches() + (extra or [])
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_matrix(matches, roster, who, is_trial))
 
     if path == "/record":
-        if not who:
-            return _redirect("/login")
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_record(roster, who, trial=is_trial))
 
@@ -350,7 +361,7 @@ def _fuzzy_flags(team_a, team_b, roster, form):
 
 def _post_record(form, store, who, trial, is_trial, extra):
     if not who:
-        return _redirect("/login")
+        return _redirect("/")
 
     fmt, values = _match_fields(form)
     confirmed = _confirmed_fields(form)
@@ -478,7 +489,7 @@ def _post_sample(trial, load):
     reset-then-load / clear semantics. Requires an active trial cookie.
     """
     if trial is None:
-        return _redirect("/login")
+        return _redirect("/")
     payload = dict(trial)
     payload["sample"] = bool(load)
     payload["matches"] = []
