@@ -201,7 +201,8 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
 
     if path == "/matrix":
         matches = store.read_matches() + (extra or [])
-        return _html(core.render_matrix(matches, who, is_trial))
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_matrix(matches, roster, who, is_trial))
 
     if path == "/record":
         if not who:

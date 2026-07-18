@@ -1009,17 +1009,24 @@ def _matrix_table(players, lookup):
             + "</tbody></table></div>")
 
 
-def render_matrix(matches, who=None, trial=False):
+def render_matrix(matches, roster=None, who=None, trial=False):
     mx = compute_matrices(matches)
     syn, syn_players = mx["synergy"], mx["synergy_players"]
     h2h, h2h_players = mx["h2h"], mx["h2h_players"]
 
-    if syn_players:
+    # Axis = every known player (roster + anyone appearing in matches), so the
+    # grids list all names even at 0 games; empty cells render as faded "—".
+    order = lambda names: sorted(set(names), key=lambda x: (x.lower(), x))
+    players_axis = order(list(roster or []) + syn_players + h2h_players)
+
+    if players_axis:
         syn_table = _matrix_table(
-            syn_players, lambda r, c: syn.get(_pair_key(r, c)))
+            players_axis, lambda r, c: syn.get(_pair_key(r, c)))
+        h2h_table = _matrix_table(players_axis, lambda r, c: h2h.get((r, c)))
     else:
-        syn_table = ("<p class='muted'>No 2v2 matches yet — record some "
-                     "doubles (or load the sample data in trial mode).</p>")
+        empty = ("<p class='muted'>No players yet — register on the login "
+                 "page (or load the sample data in trial mode).</p>")
+        syn_table = h2h_table = empty
 
     ranked = []
     for (n1, n2), cell in syn.items():
@@ -1044,11 +1051,6 @@ def render_matrix(matches, who=None, trial=False):
     else:
         best_html = worst_html = ("<p class='muted'>Not enough 2v2 pairings "
                                   "(need &ge; 2 games together).</p>")
-
-    if h2h_players:
-        h2h_table = _matrix_table(h2h_players, lambda r, c: h2h.get((r, c)))
-    else:
-        h2h_table = "<p class='muted'>No matches yet.</p>"
 
     legend = ("<p class='muted'>Cells: row's win% vs column. Hover for W-L and "
               "games. &mdash; = fewer than 2 shared games. "
