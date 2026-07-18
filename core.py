@@ -23,7 +23,7 @@ import html
 import json
 import random
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # === Constants ==============================================================
 
@@ -234,13 +234,46 @@ def bucket_label(gap):
     return "> 300"
 
 
-def rating_delta(rating_a, rating_b, a_won):
+# --- Score-margin multiplier (era-gated) ------------------------------------
+# Matches with timestamp >= this cutoff have their transfer scaled by a linear
+# score-margin multiplier; earlier matches are rule-frozen (multiplier 1.0) so
+# they replay to bit-for-bit the same ratings as before this rule existed.
+MARGIN_RULE_START = "2026-07-18T20:41:15+00:00"
+_MARGIN_CUTOFF = datetime.fromisoformat(MARGIN_RULE_START)
+
+
+def margin_multiplier(score_a, score_b):
+    """Linear margin multiplier: 0.6 + 0.1*|winner-loser|. 10-8→0.8, 10-6→1.0
+    (par), 10-0→1.6. No log, no cap."""
+    try:
+        margin = abs(int(score_a) - int(score_b))
+    except (TypeError, ValueError):
+        return 1.0
+    return 0.6 + 0.1 * margin
+
+
+def match_scored(m):
+    """True iff the match's timestamp is at/after the margin-rule cutoff (so its
+    transfer is score-weighted). Offset-robust via datetime parsing; naive
+    timestamps are treated as UTC. Unparseable/absent -> pre-cutoff (False)."""
+    try:
+        dt = datetime.fromisoformat(m.get("timestamp_iso"))
+    except (TypeError, ValueError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt >= _MARGIN_CUTOFF
+
+
+def rating_delta(rating_a, rating_b, a_won, score_mult=1.0):
     """
-    Zero-sum transfer: the loser loses exactly what the winner gains, and that
-    amount is the WINNER's role-based X. So an upset moves the full underdog-X
-    both ways; an expected win moves the smaller favourite-X both ways. A tie in
-    ratings makes BOTH sides favourite. Returns (a_delta, b_delta, meta); each
-    delta is what EVERY player on that side moves by.
+    Zero-sum transfer: the loser loses exactly what the winner gains. The base
+    amount T0 is the WINNER's role-based X (upset moves the full underdog-X both
+    ways; an expected win moves the smaller favourite-X). The actual transfer is
+    T = round(T0 * score_mult), so `score_mult=1.0` reproduces the pre-margin
+    behaviour exactly (T0 is an int → round is identity). A tie in ratings makes
+    BOTH sides favourite. Returns (a_delta, b_delta, meta); each delta is what
+    EVERY player on that side moves by.
     """
     gap = abs(rating_a - rating_b)
     fav_x, under_x = bucket_x(gap)
@@ -248,7 +281,8 @@ def rating_delta(rating_a, rating_b, a_won):
     b_is_fav = rating_b >= rating_a
     a_role_x = fav_x if a_is_fav else under_x   # each side's own role X
     b_role_x = fav_x if b_is_fav else under_x
-    transfer = a_role_x if a_won else b_role_x  # amount moved = the WINNER's role X
+    base_transfer = a_role_x if a_won else b_role_x   # T0 = the WINNER's role X
+    transfer = round(base_transfer * score_mult)      # T = round(T0 * mult)
     a_delta = transfer if a_won else -transfer
     b_delta = transfer if (not a_won) else -transfer
     meta = {
@@ -256,7 +290,10 @@ def rating_delta(rating_a, rating_b, a_won):
         "a_role": "favourite" if a_is_fav else "underdog",
         "b_role": "favourite" if b_is_fav else "underdog",
         "a_x": abs(a_delta), "b_x": abs(b_delta),  # actual amount each side moved
+        "base_transfer": base_transfer,
         "transfer": transfer,
+        "score_mult": score_mult,
+        "margin": round((score_mult - 0.6) / 0.1),  # inverse of margin_multiplier
     }
     return a_delta, b_delta, meta
 
@@ -373,8 +410,10 @@ def compute_stats(matches, roster=None, seed_map=None, fmt=None):
         rating_b = sum(rget(n) for n in team_b) / len(team_b)
         a_won = score_a > score_b
 
-        # Gap-bucketed asymmetric point transfer (not zero-sum, margin ignored).
-        a_delta, b_delta, _meta = rating_delta(rating_a, rating_b, a_won)
+        # Zero-sum transfer, gap-bucketed; scaled by the score margin only for
+        # post-cutoff matches (older matches stay rule-frozen at mult 1.0).
+        sm = margin_multiplier(score_a, score_b) if match_scored(m) else 1.0
+        a_delta, b_delta, _meta = rating_delta(rating_a, rating_b, a_won, score_mult=sm)
         for n in team_a:
             ratings[n] = rget(n) + a_delta
         for n in team_b:
@@ -500,7 +539,9 @@ def match_breakdown(matches, roster=None, seed_map=None, match_id=None, fmt=None
         rating_a = sum(rget(n) for n in team_a) / len(team_a)
         rating_b = sum(rget(n) for n in team_b) / len(team_b)
         a_won = score_a > score_b
-        a_delta, b_delta, meta = rating_delta(rating_a, rating_b, a_won)
+        scored = match_scored(m)
+        sm = margin_multiplier(score_a, score_b) if scored else 1.0
+        a_delta, b_delta, meta = rating_delta(rating_a, rating_b, a_won, score_mult=sm)
 
         is_target = str(m.get("id")) == str(match_id)
         breakdown = None
@@ -525,6 +566,8 @@ def match_breakdown(matches, roster=None, seed_map=None, match_id=None, fmt=None
                 "gap": meta["gap"], "fav_x": meta["fav_x"],
                 "under_x": meta["under_x"], "bucket": bucket_label(meta["gap"]),
                 "a_role": meta["a_role"], "b_role": meta["b_role"],
+                "scored": scored, "score_mult": meta["score_mult"],
+                "margin": abs(score_a - score_b), "transfer": meta["transfer"],
                 "players": players,
             }
 
@@ -1515,8 +1558,15 @@ def render_breakdown(bd, who=None, trial=False):
         f"<strong>{esc(bd['bucket'])}</strong> "
         f"<span class='muted'>(favourite X {bd['fav_x']}, "
         f"underdog X {bd['under_x']})</span></p>"
-        "</div>"
     )
+    # Score-margin line only for post-cutoff (scored) matches.
+    if bd.get("scored"):
+        detail += (
+            f"<p>Score margin {bd['score_a']}–{bd['score_b']} &rarr; "
+            f"<strong>&times;{bd['score_mult']:.1f}</strong> "
+            f"<span class='muted'>(transfer {bd['transfer']})</span></p>"
+        )
+    detail += "</div>"
 
     body = (
         f"<h1>{esc(title)}</h1>" + detail + table
