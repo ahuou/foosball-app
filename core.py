@@ -18,6 +18,7 @@ Contents:
 Python 3 standard library only.
 """
 
+import difflib
 import html
 import json
 import random
@@ -103,6 +104,33 @@ def canonical_name(players_rows, name):
     return name
 
 
+SIMILAR_THRESHOLD = 0.80   # difflib ratio at/above which a new name is flagged
+
+
+def suggest_similar(name, existing_names, threshold=SIMILAR_THRESHOLD):
+    """
+    Soft "did you mean" guard. `name` is a NEW name (no exact case-insensitive
+    match). Return the single best existing name it is fuzzy-similar to, or None.
+    Similar iff difflib ratio >= threshold OR one name is a prefix of the other
+    with <= 2 extra chars (catches Matte/Matteo, Mate/Matteo, Mat/Mate).
+    """
+    key = name.strip().lower()
+    if not key:
+        return None
+    best_name, best_score = None, 0.0
+    for e in existing_names:
+        el = (e or "").strip().lower()
+        if not el or el == key:
+            continue
+        ratio = difflib.SequenceMatcher(None, key, el).ratio()
+        shorter, longer = sorted((key, el), key=len)
+        prefix_hit = longer.startswith(shorter) and (len(longer) - len(shorter)) <= 2
+        score = max(ratio, 0.90 if prefix_hit else 0.0)
+        if (ratio >= threshold or prefix_hit) and score > best_score:
+            best_name, best_score = e, score
+    return best_name
+
+
 def roster_names(players_rows, extra_matches=None):
     """
     Ordered list of canonical player display names for autocomplete: the stored
@@ -174,9 +202,13 @@ def sample_matches():
 
 # === Rating engine (gap-bucketed asymmetric point transfer) =================
 #
-# Not zero-sum. Each SIDE gets an X from its ROLE (favourite/underdog) based on
-# the rating gap; the winning side ADDS its role-X to every member, the losing
-# side SUBTRACTS its role-X from every member. Margin of victory is ignored.
+# Zero-sum transfer. The bucket gives a favourite-X and underdog-X from the gap.
+# The amount that moves is the WINNER's role-X: the winning side ADDS it to every
+# member and the losing side SUBTRACTS the SAME amount from every member. So an
+# upset (underdog wins) moves the big underdog-X both ways; an expected win
+# (favourite wins) moves the small favourite-X both ways. Points are conserved
+# within a match (winner gains == loser loses) but not across matches (X varies).
+# Margin of victory is ignored.
 
 def bucket_x(gap):
     """Rating gap -> (favourite_X, underdog_X). Boundaries are inclusive-upper."""
@@ -204,23 +236,27 @@ def bucket_label(gap):
 
 def rating_delta(rating_a, rating_b, a_won):
     """
-    Given the two SIDE ratings and whether side A won, return
-    (a_delta, b_delta, meta) where each delta is what EVERY player on that side
-    moves by. A tie in ratings makes BOTH sides favourite.
+    Zero-sum transfer: the loser loses exactly what the winner gains, and that
+    amount is the WINNER's role-based X. So an upset moves the full underdog-X
+    both ways; an expected win moves the smaller favourite-X both ways. A tie in
+    ratings makes BOTH sides favourite. Returns (a_delta, b_delta, meta); each
+    delta is what EVERY player on that side moves by.
     """
     gap = abs(rating_a - rating_b)
     fav_x, under_x = bucket_x(gap)
     a_is_fav = rating_a >= rating_b      # equal -> both favourite
     b_is_fav = rating_b >= rating_a
-    a_x = fav_x if a_is_fav else under_x
-    b_x = fav_x if b_is_fav else under_x
-    a_delta = a_x if a_won else -a_x
-    b_delta = b_x if (not a_won) else -b_x
+    a_role_x = fav_x if a_is_fav else under_x   # each side's own role X
+    b_role_x = fav_x if b_is_fav else under_x
+    transfer = a_role_x if a_won else b_role_x  # amount moved = the WINNER's role X
+    a_delta = transfer if a_won else -transfer
+    b_delta = transfer if (not a_won) else -transfer
     meta = {
         "gap": gap, "fav_x": fav_x, "under_x": under_x,
         "a_role": "favourite" if a_is_fav else "underdog",
         "b_role": "favourite" if b_is_fav else "underdog",
-        "a_x": a_x, "b_x": b_x,
+        "a_x": abs(a_delta), "b_x": abs(b_delta),  # actual amount each side moved
+        "transfer": transfer,
     }
     return a_delta, b_delta, meta
 
@@ -639,11 +675,28 @@ input[type=text], input[type=number], select {
 .btn-sm.danger { color: #dc2626; border-color: #fecaca; }
 .btn-sm.danger:hover { background: #fef2f2; }
 .mctl form { display: inline; margin: 0; }
+.ac-wrap { position: relative; }
+.ac-list {
+  position: absolute; left: 0; right: 0; top: 100%; z-index: 30;
+  background: #fff; border: 1px solid #cbd5e1; border-radius: 6px;
+  max-height: 220px; overflow-y: auto; box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+  margin-top: 2px;
+}
+.ac-item { padding: 9px 11px; cursor: pointer; font-size: 0.95rem; }
+.ac-item:hover, .ac-item.active { background: #eef2ff; }
+.dym {
+  background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+  padding: 9px 12px; border-radius: 6px; margin: 8px 0;
+}
+.dym .btn-sm { margin-top: 0; }
 @media (prefers-color-scheme: dark) {
   .btn-sm { background: #111827; border-color: #4b5563; color: #93c5fd; }
   .btn-sm:hover { background: #1e293b; }
   .btn-sm.danger { color: #fca5a5; border-color: #7f1d1d; }
   .btn-sm.danger:hover { background: #3f1d1d; }
+  .ac-list { background: #1f2937; border-color: #4b5563; }
+  .ac-item:hover, .ac-item.active { background: #374151; }
+  .dym { background: #3a2e12; border-color: #78591c; color: #fcd34d; }
 }
 .trialbar {
   background: #7c3aed; color: #fff; text-align: center; font-weight: 600;
@@ -760,10 +813,13 @@ def _js_json(obj):
 
 def roster_autocomplete_script(names):
     """
-    Inline JS: build a {lowercased: canonical} lookup from the injected roster,
-    then snap any name input (marked data-roster) to the canonical casing on
-    blur / change when it case-insensitively matches. Unmatched names are left
-    exactly as typed. The map is derived from `names` — nothing hardcoded.
+    Inline JS for each name input (marked data-roster):
+      * a custom vanilla type-ahead dropdown (case-insensitive substring of the
+        roster, keyboard up/down/enter + click/tap select) — reliable on mobile,
+        the primary UX (the native <datalist> stays as a fallback);
+      * the existing canonical-casing snap on blur/change.
+    Candidate names come only from the injected roster (ROSTER) — nothing
+    hardcoded. Everything is JSON-encoded safely for the script context.
     """
     mapping = {}
     for n in names:
@@ -771,11 +827,39 @@ def roster_autocomplete_script(names):
     return (
         "<script>"
         f"(function(){{var ROSTER={_js_json(mapping)};"
+        "var NAMES=Object.keys(ROSTER).map(function(k){return ROSTER[k];});"
         "function snap(el){var v=(el.value||'').trim();if(!v)return;"
         "var c=ROSTER[v.toLowerCase()];if(c){el.value=c;}}"
-        "document.querySelectorAll('input[data-roster]').forEach(function(el){"
-        "el.addEventListener('blur',function(){snap(el);});"
-        "el.addEventListener('change',function(){snap(el);});});})();"
+        "function setup(input){"
+        "  var wrap=document.createElement('div');wrap.className='ac-wrap';"
+        "  input.parentNode.insertBefore(wrap,input);wrap.appendChild(input);"
+        "  var list=document.createElement('div');list.className='ac-list';"
+        "  list.style.display='none';wrap.appendChild(list);"
+        "  var items=[],active=-1;"
+        "  function choose(n){input.value=n;hide();}"
+        "  function hide(){list.style.display='none';active=-1;}"
+        "  function setActive(i){items.forEach(function(o){o.className='ac-item';});"
+        "    if(i>=0&&i<items.length){items[i].className='ac-item active';active=i;"
+        "      items[i].scrollIntoView({block:'nearest'});}else{active=-1;}}"
+        "  function render(){var q=(input.value||'').trim().toLowerCase();"
+        "    list.innerHTML='';items=[];active=-1;"
+        "    if(!q){hide();return;}"
+        "    var ms=NAMES.filter(function(n){return n.toLowerCase().indexOf(q)>=0;}).slice(0,8);"
+        "    if(ms.length===0||(ms.length===1&&ms[0].toLowerCase()===q)){hide();return;}"
+        "    ms.forEach(function(n){var o=document.createElement('div');o.className='ac-item';"
+        "      o.textContent=n;o.addEventListener('mousedown',function(e){e.preventDefault();choose(n);});"
+        "      list.appendChild(o);items.push(o);});list.style.display='block';}"
+        "  input.addEventListener('input',render);"
+        "  input.addEventListener('focus',render);"
+        "  input.addEventListener('keydown',function(e){"
+        "    if(list.style.display==='none')return;"
+        "    if(e.key==='ArrowDown'){e.preventDefault();setActive(Math.min(active+1,items.length-1));}"
+        "    else if(e.key==='ArrowUp'){e.preventDefault();setActive(Math.max(active-1,0));}"
+        "    else if(e.key==='Enter'){if(active>=0){e.preventDefault();choose(items[active].textContent);}}"
+        "    else if(e.key==='Escape'){hide();}});"
+        "  input.addEventListener('blur',function(){setTimeout(function(){hide();snap(input);},150);});"
+        "  input.addEventListener('change',function(){snap(input);});}"
+        "document.querySelectorAll('input[data-roster]').forEach(setup);})();"
         "</script>"
     )
 
@@ -958,8 +1042,44 @@ def render_login(roster, who=None, trial=False):
     return base_page("Login — Foosball Tracker", body, who, trial=trial)
 
 
+def _did_you_mean_html(flags):
+    """
+    Soft duplicate notice inside the match form: per flagged name, offer
+    "Use <existing>" (fills the field) or "No, create <typed>" (adds a
+    per-field confirm token and resubmits). Buttons wire up via data attributes
+    (no inline JS escaping headaches); names are HTML-escaped.
+    """
+    if not flags:
+        return ""
+    rows = []
+    for fl in flags:
+        rows.append(
+            f"<div class='dym' data-field='{esc(fl['field'])}' "
+            f"data-sug='{esc(fl['suggestion'])}'>"
+            f"‘{esc(fl['typed'])}’ looks like existing player "
+            f"‘{esc(fl['suggestion'])}’. "
+            f"<button type='button' class='btn-sm dym-use'>Use ‘{esc(fl['suggestion'])}’</button> "
+            f"<button type='button' class='btn-sm dym-new'>No, create ‘{esc(fl['typed'])}’</button>"
+            "</div>"
+        )
+    script = (
+        "<script>"
+        "document.querySelectorAll('.dym').forEach(function(d){"
+        "var frm=document.getElementById('matchform');"
+        "var field=d.getAttribute('data-field'),sug=d.getAttribute('data-sug');"
+        "d.querySelector('.dym-use').addEventListener('click',function(){"
+        "  if(frm.elements[field]){frm.elements[field].value=sug;}d.parentNode.removeChild(d);});"
+        "d.querySelector('.dym-new').addEventListener('click',function(){"
+        "  var i=document.createElement('input');i.type='hidden';i.name='confirm_'+field;"
+        "  i.value='1';frm.appendChild(i);frm.submit();});});"
+        "</script>"
+    )
+    return ("<div class='error'>Possible duplicate players — please check:</div>"
+            + "".join(rows) + script)
+
+
 def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match",
-                hidden=""):
+                hidden="", flags=None, confirmed=None):
     """Shared match form (record + edit): 1v1/2v2 toggle, slots, scores."""
     values = values or {}
 
@@ -969,9 +1089,14 @@ def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match
     dl = datalist_html("players", roster)
     checked_1 = "checked" if fmt != "2v2" else ""
     checked_2 = "checked" if fmt == "2v2" else ""
+    # Re-emit already-accepted create-new confirmations so multi-name flows
+    # don't lose earlier confirmations across resubmits.
+    confirm_hidden = "".join(
+        f"<input type='hidden' name='confirm_{esc(f)}' value='1'>"
+        for f in (confirmed or []))
     return (
-        f"<form class='card' method='post' action='{esc(action)}'>"
-        + hidden +
+        f"<form id='matchform' class='card' method='post' action='{esc(action)}'>"
+        + hidden + confirm_hidden + _did_you_mean_html(flags) +
         "<label>Format</label>"
         "<div class='toggle'>"
         f"<label><input type='radio' name='format' value='1v1' {checked_1} onclick='setFmt(false)'> 1v1</label>"
@@ -1011,21 +1136,24 @@ def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match
     )
 
 
-def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=False):
+def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=False,
+                  flags=None, confirmed=None):
     err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
     controls = sample_controls_html() if trial else ""
     body = ("<h1>Record a match</h1>" + err_html + controls
-            + _match_form("/record", roster, fmt, values, "Save match"))
+            + _match_form("/record", roster, fmt, values, "Save match",
+                          flags=flags, confirmed=confirmed))
     return base_page("Record — Foosball Tracker", body, who, trial=trial)
 
 
 def render_edit(roster, match_id, who=None, error=None, fmt="1v1", values=None,
-                trial=False):
+                trial=False, flags=None, confirmed=None):
     err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
     hidden = f"<input type='hidden' name='id' value='{esc(match_id)}'>"
     body = (
         f"<h1>Edit match #{esc(match_id)}</h1>" + err_html
-        + _match_form("/edit", roster, fmt, values, "Save changes", hidden=hidden)
+        + _match_form("/edit", roster, fmt, values, "Save changes", hidden=hidden,
+                      flags=flags, confirmed=confirmed)
         + "<p style='margin-top:12px'><a href='/history'>&larr; Back to history</a></p>"
     )
     return base_page("Edit match — Foosball Tracker", body, who, trial=trial)

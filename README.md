@@ -81,14 +81,16 @@ for beating weaker opponents. Everyone starts at their **seed** rating (default 
   | 151–300 | 10 | 30 |
   | 301+ | 5 | 35 |
 
-- The **winning side adds** its role's X to each member; the **losing side subtracts**
-  its role's X. So a player always moves by *their side's* X, whether they won or lost.
+- The match is a **zero-sum transfer**: the amount that moves is the **winner's** role X.
+  The winning side **adds** it to each member and the losing side **subtracts the same
+  amount** from each member. So an **upset** (underdog wins) moves the big underdog X both
+  ways; an **expected win** (favourite wins) moves the small favourite X both ways.
   Doubles teammates move by the same amount. Score margin is ignored; there is no floor.
-- This is deliberately **not zero-sum** — a favourite beating a weak underdog nets points
-  out of the system; an upset injects points to the underdog.
+- Points are **conserved within a match** (winner gains == loser loses) but **not across
+  matches** (X depends on the gap/outcome). The bigger the upset, the more points move.
 
-**Example:** 1200 (fav) vs 1000 (under), gap 200 → favX 10 / underX 30. Favourite wins →
-1210 / 970. Underdog wins → 1030 / 1190.
+**Example:** 1200 (fav) vs 1000 (under), gap 200 → favX 10 / underX 30. Favourite wins
+(expected) → 1210 / 990 (moves 10). Underdog wins (upset) → 1030 / 1170 (moves 30).
 
 **Per-match breakdown:** after recording, the result page shows each player's
 old → new rating, their role (favourite/underdog), and the X applied — and for doubles,

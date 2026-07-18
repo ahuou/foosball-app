@@ -317,20 +317,59 @@ def _validate_match(fmt, values):
     return (None, team_a, team_b, score_a, score_b)
 
 
+def _confirmed_fields(form):
+    """Fields whose new name the user already confirmed via a 'create anyway' token."""
+    return [f for f in ("a1", "a2", "b1", "b2") if form.get("confirm_" + f)]
+
+
+def _fuzzy_flags(team_a, team_b, roster, form):
+    """
+    Soft "did you mean" guard. For each submitted name that is NOT an exact
+    (case-insensitive) roster member and was NOT confirmed via confirm_<field>,
+    find the single best fuzzy-similar existing name. Returns a list of
+    {field, typed, suggestion}. Empty => nothing to warn about.
+    """
+    pairs = [("a1", team_a[0])]
+    if len(team_a) > 1:
+        pairs.append(("a2", team_a[1]))
+    pairs.append(("b1", team_b[0]))
+    if len(team_b) > 1:
+        pairs.append(("b2", team_b[1]))
+    lower_roster = {r.strip().lower() for r in roster}
+    flags = []
+    for field, name in pairs:
+        if name.strip().lower() in lower_roster:
+            continue  # exact existing player -> canonicalized as usual
+        if form.get("confirm_" + field):
+            continue  # user chose "create anyway" for this field
+        suggestion = core.suggest_similar(name, roster)
+        if suggestion:
+            flags.append({"field": field, "typed": name, "suggestion": suggestion})
+    return flags
+
+
 def _post_record(form, store, who, trial, is_trial, extra):
     if not who:
         return _redirect("/login")
 
     fmt, values = _match_fields(form)
+    confirmed = _confirmed_fields(form)
 
-    def fail(msg):
+    def fail(msg=None, flags=None):
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_record(roster, who, error=msg, fmt=fmt,
-                                        values=values, trial=is_trial), 400)
+                                        values=values, trial=is_trial,
+                                        flags=flags, confirmed=confirmed), 400)
 
     error, team_a, team_b, score_a, score_b = _validate_match(fmt, values)
     if error:
         return fail(error)
+
+    # Soft duplicate guard: re-render (preserving values) if any near-miss name.
+    roster = core.roster_names(store.read_players(), extra)
+    flags = _fuzzy_flags(team_a, team_b, roster, form)
+    if flags:
+        return fail(flags=flags)
 
     if is_trial:
         # Canonicalize against known players WITHOUT creating any; append to the
@@ -389,11 +428,13 @@ def _post_edit(form, store, who, is_trial, extra):
     """Edit a real stored match: validate like /record, then update_match."""
     mid = (form.get("id", [""])[0]).strip()
     fmt, values = _match_fields(form)
+    confirmed = _confirmed_fields(form)
 
-    def fail(msg):
+    def fail(msg=None, flags=None):
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_edit(roster, mid, who, error=msg, fmt=fmt,
-                                      values=values, trial=is_trial), 400)
+                                      values=values, trial=is_trial,
+                                      flags=flags, confirmed=confirmed), 400)
 
     # Only real, currently-stored matches are editable.
     if not mid or not any(str(m.get("id")) == mid for m in store.read_matches()):
@@ -402,6 +443,12 @@ def _post_edit(form, store, who, is_trial, extra):
     error, team_a, team_b, score_a, score_b = _validate_match(fmt, values)
     if error:
         return fail(error)
+
+    # Same soft duplicate guard as /record.
+    roster = core.roster_names(store.read_players(), extra)
+    flags = _fuzzy_flags(team_a, team_b, roster, form)
+    if flags:
+        return fail(flags=flags)
 
     # Auto-create any new player names (same as recording).
     team_a = [store.write_player(n) for n in team_a]
