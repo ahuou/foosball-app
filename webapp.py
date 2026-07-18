@@ -213,6 +213,21 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_record(roster, who, trial=is_trial))
 
+    if path == "/history":
+        matches = store.read_matches() + (extra or [])
+        return _html(core.render_history(matches, who, is_trial))
+
+    if path == "/edit":
+        q = urllib.parse.parse_qs(query)
+        mid = (q.get("id", [""])[0]).strip()
+        match = next((m for m in store.read_matches() if str(m.get("id")) == mid), None)
+        if match is None:
+            return _redirect("/history")   # unknown/ephemeral id -> nothing to edit
+        roster = core.roster_names(store.read_players(), extra)
+        fmt, values = core.match_values(match)
+        return _html(core.render_edit(roster, mid, who, fmt=fmt, values=values,
+                                      trial=is_trial))
+
     if path == "/player":
         q = urllib.parse.parse_qs(query)
         name = (q.get("name", [""])[0]).strip()
@@ -234,6 +249,10 @@ def _handle_post(path, form, store, who, trial, is_trial, extra):
         return _post_login(form, store, trial)
     if path == "/record":
         return _post_record(form, store, who, trial, is_trial, extra)
+    if path == "/edit":
+        return _post_edit(form, store, who, is_trial, extra)
+    if path == "/delete":
+        return _post_delete(form, store)
     if path == "/trial/load-sample":
         return _post_sample(trial, load=True)
     if path == "/trial/clear-sample":
@@ -260,46 +279,58 @@ def _post_login(form, store, trial):
     return _redirect("/", [_who_cookie(canonical), _clear_cookie("trial")])
 
 
+def _match_fields(form):
+    """Extract (fmt, values) from a record/edit form body."""
+    fmt = (form.get("format", ["1v1"])[0]).strip()
+    values = {k: (form.get(k, [""])[0]).strip()
+              for k in ("a1", "a2", "b1", "b2", "score_a", "score_b")}
+    return fmt, values
+
+
+def _validate_match(fmt, values):
+    """
+    Validate a match exactly like /record. Returns
+    (error_or_None, team_a, team_b, score_a, score_b).
+    """
+    if fmt not in ("1v1", "2v2"):
+        return ("Invalid format.", None, None, None, None)
+    if fmt == "1v1":
+        team_a, team_b = [values["a1"]], [values["b1"]]
+    else:
+        team_a, team_b = [values["a1"], values["a2"]], [values["b1"], values["b2"]]
+
+    if any(not n for n in team_a + team_b):
+        return ("All player slots must be filled.", None, None, None, None)
+    lowered = [n.lower() for n in team_a + team_b]
+    if len(set(lowered)) != len(lowered):
+        return ("All players must be distinct.", None, None, None, None)
+
+    try:
+        score_a = int(values["score_a"])
+        score_b = int(values["score_b"])
+    except (TypeError, ValueError):
+        return ("Scores must be whole numbers.", None, None, None, None)
+    if score_a < 0 or score_b < 0:
+        return ("Scores must be non-negative.", None, None, None, None)
+    if score_a == score_b:
+        return ("Ties are not allowed — one side must win.", None, None, None, None)
+    return (None, team_a, team_b, score_a, score_b)
+
+
 def _post_record(form, store, who, trial, is_trial, extra):
     if not who:
         return _redirect("/login")
 
-    fmt = (form.get("format", ["1v1"])[0]).strip()
-    values = {k: (form.get(k, [""])[0]).strip()
-              for k in ("a1", "a2", "b1", "b2", "score_a", "score_b")}
+    fmt, values = _match_fields(form)
 
     def fail(msg):
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_record(roster, who, error=msg, fmt=fmt,
                                         values=values, trial=is_trial), 400)
 
-    # --- Validate format & assemble teams. ---
-    if fmt not in ("1v1", "2v2"):
-        return fail("Invalid format.")
-    if fmt == "1v1":
-        team_a = [values["a1"]]
-        team_b = [values["b1"]]
-    else:
-        team_a = [values["a1"], values["a2"]]
-        team_b = [values["b1"], values["b2"]]
-
-    if any(not n for n in team_a + team_b):
-        return fail("All player slots must be filled.")
-
-    lowered = [n.lower() for n in team_a + team_b]
-    if len(set(lowered)) != len(lowered):
-        return fail("All players must be distinct.")
-
-    # --- Validate scores. ---
-    try:
-        score_a = int(values["score_a"])
-        score_b = int(values["score_b"])
-    except (TypeError, ValueError):
-        return fail("Scores must be whole numbers.")
-    if score_a < 0 or score_b < 0:
-        return fail("Scores must be non-negative.")
-    if score_a == score_b:
-        return fail("Ties are not allowed — one side must win.")
+    error, team_a, team_b, score_a, score_b = _validate_match(fmt, values)
+    if error:
+        return fail(error)
 
     if is_trial:
         # Canonicalize against known players WITHOUT creating any; append to the
@@ -352,6 +383,45 @@ def _post_record(form, store, who, trial, is_trial, extra):
     bd = core.match_breakdown(store.read_matches(), [p["name"] for p in players],
                               track_seed, new_id, fmt=fmt)
     return _html(core.render_breakdown(bd, who, trial=False))
+
+
+def _post_edit(form, store, who, is_trial, extra):
+    """Edit a real stored match: validate like /record, then update_match."""
+    mid = (form.get("id", [""])[0]).strip()
+    fmt, values = _match_fields(form)
+
+    def fail(msg):
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_edit(roster, mid, who, error=msg, fmt=fmt,
+                                      values=values, trial=is_trial), 400)
+
+    # Only real, currently-stored matches are editable.
+    if not mid or not any(str(m.get("id")) == mid for m in store.read_matches()):
+        return _redirect("/history")
+
+    error, team_a, team_b, score_a, score_b = _validate_match(fmt, values)
+    if error:
+        return fail(error)
+
+    # Auto-create any new player names (same as recording).
+    team_a = [store.write_player(n) for n in team_a]
+    team_b = [store.write_player(n) for n in team_b]
+    store.update_match(mid, {
+        "format": fmt,
+        "team_a": ";".join(team_a),
+        "team_b": ";".join(team_b),
+        "score_a": score_a,
+        "score_b": score_b,
+    })
+    return _redirect("/history")
+
+
+def _post_delete(form, store):
+    """Delete a real stored match (POST-only so links/prefetch can't trigger it)."""
+    mid = (form.get("id", [""])[0]).strip()
+    if mid:
+        store.delete_match(mid)   # no-op if id not found / ephemeral
+    return _redirect("/history")
 
 
 def _post_sample(trial, load):

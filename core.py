@@ -629,6 +629,22 @@ input[type=text], input[type=number], select {
 .toggle label { display: flex; align-items: center; gap: 6px; margin: 0;
   font-weight: 500; cursor: pointer; }
 .feed li { margin: 4px 0; }
+.mctl { white-space: nowrap; }
+.btn-sm {
+  display: inline-block; padding: 2px 9px; margin-left: 4px; font-size: 0.78rem;
+  border: 1px solid #cbd5e1; border-radius: 5px; background: #fff; color: #2563eb;
+  cursor: pointer; text-decoration: none; line-height: 1.6;
+}
+.btn-sm:hover { background: #eef2ff; }
+.btn-sm.danger { color: #dc2626; border-color: #fecaca; }
+.btn-sm.danger:hover { background: #fef2f2; }
+.mctl form { display: inline; margin: 0; }
+@media (prefers-color-scheme: dark) {
+  .btn-sm { background: #111827; border-color: #4b5563; color: #93c5fd; }
+  .btn-sm:hover { background: #1e293b; }
+  .btn-sm.danger { color: #fca5a5; border-color: #7f1d1d; }
+  .btn-sm.danger:hover { background: #3f1d1d; }
+}
 .trialbar {
   background: #7c3aed; color: #fff; text-align: center; font-weight: 600;
   padding: 10px 16px; font-size: 0.92rem;
@@ -698,6 +714,7 @@ def base_page(title, body, who=None, trial=False):
         f"<title>{esc(title)}</title><style>{PAGE_CSS}</style></head><body>"
         "<header class='topbar'><div class='inner'>"
         "<span class='brand'><a href='/' style='color:#fff'>&#9917; Foosball Tracker</a>"
+        " &nbsp;<a href='/history' style='font-size:0.9rem'>History</a>"
         " &nbsp;<a href='/matrix' style='font-size:0.9rem'>Matrix</a></span>"
         f"<span>{who_html}</span>"
         "</div></header>"
@@ -798,7 +815,29 @@ def _board_table(data, heading):
     )
 
 
-def _recent_feed(matches):
+def _match_controls(m, editable):
+    """
+    Edit + Delete controls for a match. Rendered ONLY for real stored matches:
+    trial/sample rows (ids starting with 't') are ephemeral and not in the store
+    (marked "trial" instead), and controls are suppressed entirely in trial mode.
+    """
+    mid = str(m.get("id", ""))
+    if _is_trial_id(mid):
+        return "<span class='tag-trial'>trial</span>"
+    if not editable:
+        return ""
+    return (
+        "<span class='mctl'>"
+        f"<a class='btn-sm' href='/edit?id={urllib.parse.quote(mid)}'>Edit</a>"
+        "<form method='post' action='/delete' "
+        "onsubmit=\"return confirm('Delete this match? Stats will recompute.');\">"
+        f"<input type='hidden' name='id' value='{esc(mid)}'>"
+        "<button class='btn-sm danger' type='submit'>Delete</button></form>"
+        "</span>"
+    )
+
+
+def _recent_feed(matches, editable=False):
     """Combined recent-matches feed across both formats (latest ~15)."""
     ordered = sorted(matches or [],
                      key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
@@ -817,13 +856,12 @@ def _recent_feed(matches):
         a_cls = "win" if a_won else "loss"
         b_cls = "loss" if a_won else "win"
         when = esc((m.get("timestamp_iso") or "")[:16].replace("T", " "))
-        tag = ("<span class='tag-trial'>trial</span>"
-               if _is_trial_id(m.get("id")) else "")
         items.append(
             f"<li><span class='{a_cls}'>{a}</span> "
             f"<strong>{esc(sa)}–{esc(sb)}</strong> "
             f"<span class='{b_cls}'>{b}</span> "
-            f"<span class='muted'>({esc(m.get('format',''))}, {when})</span>{tag}</li>"
+            f"<span class='muted'>({esc(m.get('format',''))}, {when})</span> "
+            f"{_match_controls(m, editable)}</li>"
         )
     return "<h2>Recent matches</h2><ul class='feed'>" + "".join(items) + "</ul>"
 
@@ -837,9 +875,52 @@ def render_index(matches, roster, who=None, trial=False,
         "<h1>Leaderboards</h1>" + controls +
         _board_table(singles, "Singles (1v1)") +
         _board_table(doubles, "Doubles (2v2)") +
-        _recent_feed(matches)
+        _recent_feed(matches, editable=not trial)
     )
     return base_page("Foosball Tracker", body, who, trial=trial)
+
+
+def render_history(matches, who=None, trial=False):
+    """Full match log, newest first, with Edit/Delete on real stored matches."""
+    editable = not trial
+    ordered = sorted(matches or [],
+                     key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
+    ordered = list(reversed(ordered))
+    if not ordered:
+        body = ("<h1>Match history</h1><p class='muted'>No matches recorded yet. "
+                "<a href='/record'>Record the first match!</a></p>")
+        return base_page("History — Foosball Tracker", body, who, trial=trial)
+
+    rows = []
+    for m in ordered:
+        a = _team_names(m.get("team_a"))
+        b = _team_names(m.get("team_b"))
+        sa, sb = m.get("score_a"), m.get("score_b")
+        try:
+            a_won = int(sa) > int(sb)
+        except (TypeError, ValueError):
+            a_won = True
+        a_cls = "win" if a_won else "loss"
+        b_cls = "loss" if a_won else "win"
+        when = esc((m.get("timestamp_iso") or "")[:16].replace("T", " "))
+        rows.append(
+            "<tr>"
+            f"<td class='muted'>{when}</td>"
+            f"<td>{esc(match_format(m))}</td>"
+            f"<td><span class='{a_cls}'>{a}</span> "
+            f"<strong>{esc(sa)}–{esc(sb)}</strong> "
+            f"<span class='{b_cls}'>{b}</span></td>"
+            f"<td>{_match_controls(m, editable)}</td>"
+            "</tr>"
+        )
+    table = (
+        "<table><thead><tr><th>When</th><th>Format</th><th>Match</th>"
+        "<th>Actions</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+    note = ("<p class='muted'>Trial/sample rows are marked “trial” and can't be "
+            "edited (they're not saved).</p>") if trial else ""
+    body = "<h1>Match history</h1>" + table + note
+    return base_page("History — Foosball Tracker", body, who, trial=trial)
 
 
 def render_login(roster, who=None, trial=False):
@@ -877,21 +958,20 @@ def render_login(roster, who=None, trial=False):
     return base_page("Login — Foosball Tracker", body, who, trial=trial)
 
 
-def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=False):
+def _match_form(action, roster, fmt="1v1", values=None, submit_label="Save match",
+                hidden=""):
+    """Shared match form (record + edit): 1v1/2v2 toggle, slots, scores."""
     values = values or {}
 
     def val(k):
         return esc(values.get(k, ""))
 
-    err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
-    controls = sample_controls_html() if trial else ""
     dl = datalist_html("players", roster)
     checked_1 = "checked" if fmt != "2v2" else ""
     checked_2 = "checked" if fmt == "2v2" else ""
-
-    body = (
-        "<h1>Record a match</h1>" + err_html + controls +
-        "<form class='card' method='post' action='/record'>"
+    return (
+        f"<form class='card' method='post' action='{esc(action)}'>"
+        + hidden +
         "<label>Format</label>"
         "<div class='toggle'>"
         f"<label><input type='radio' name='format' value='1v1' {checked_1} onclick='setFmt(false)'> 1v1</label>"
@@ -916,7 +996,7 @@ def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=Fa
         f"<div><label>Score B</label><input type='number' name='score_b' min='0' value='{val('score_b')}' required></div>"
         "</div>"
         + dl +
-        "<button class='btn' type='submit'>Save match</button>"
+        f"<button class='btn' type='submit'>{esc(submit_label)}</button>"
         "</form>"
         "<script>"
         "function setFmt(is2v2){"
@@ -929,7 +1009,41 @@ def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=Fa
         "</script>"
         + roster_autocomplete_script(roster)
     )
+
+
+def render_record(roster, who=None, error=None, fmt="1v1", values=None, trial=False):
+    err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+    controls = sample_controls_html() if trial else ""
+    body = ("<h1>Record a match</h1>" + err_html + controls
+            + _match_form("/record", roster, fmt, values, "Save match"))
     return base_page("Record — Foosball Tracker", body, who, trial=trial)
+
+
+def render_edit(roster, match_id, who=None, error=None, fmt="1v1", values=None,
+                trial=False):
+    err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+    hidden = f"<input type='hidden' name='id' value='{esc(match_id)}'>"
+    body = (
+        f"<h1>Edit match #{esc(match_id)}</h1>" + err_html
+        + _match_form("/edit", roster, fmt, values, "Save changes", hidden=hidden)
+        + "<p style='margin-top:12px'><a href='/history'>&larr; Back to history</a></p>"
+    )
+    return base_page("Edit match — Foosball Tracker", body, who, trial=trial)
+
+
+def match_values(m):
+    """Extract a record/edit form `values` dict + format from a stored match."""
+    team_a = _parse_team(m.get("team_a"))
+    team_b = _parse_team(m.get("team_b"))
+    values = {
+        "a1": team_a[0] if len(team_a) > 0 else "",
+        "a2": team_a[1] if len(team_a) > 1 else "",
+        "b1": team_b[0] if len(team_b) > 0 else "",
+        "b2": team_b[1] if len(team_b) > 1 else "",
+        "score_a": str(m.get("score_a", "")),
+        "score_b": str(m.get("score_b", "")),
+    }
+    return match_format(m), values
 
 
 def _zero_stat(name, seed):

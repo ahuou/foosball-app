@@ -154,6 +154,12 @@ class Store:
     def append_match(self, row):
         raise NotImplementedError
 
+    def delete_match(self, match_id):
+        raise NotImplementedError
+
+    def update_match(self, match_id, fields):
+        raise NotImplementedError
+
 
 def _new_match_id(existing_rows):
     used = {r.get("id") for r in existing_rows}
@@ -161,6 +167,24 @@ def _new_match_id(existing_rows):
     while new_id in used:
         new_id = str(int(new_id) + 1)
     return new_id
+
+
+def _apply_match_update(rows, match_id, fields):
+    """
+    In-place: replace the mutable fields of the row whose id == match_id.
+    Keeps the original id, timestamp_iso, and recorded_by so ordering/history
+    stay stable. Returns True if the id was found.
+    """
+    match_id = str(match_id)
+    for r in rows:
+        if str(r.get("id")) == match_id:
+            r["format"] = fields["format"]
+            r["team_a"] = fields["team_a"]
+            r["team_b"] = fields["team_b"]
+            r["score_a"] = str(int(fields["score_a"]))
+            r["score_b"] = str(int(fields["score_b"]))
+            return True
+    return False
 
 
 # === LocalStore (CSV + git, unchanged LAN semantics) ========================
@@ -234,6 +258,32 @@ class LocalStore(Store):
                 csv.writer(f).writerow(out)
         self._git_commit(f"match {new_id}")
         return new_id
+
+    def _rewrite_matches(self, rows):
+        with open(self.matches_csv, "w", newline="", encoding="utf-8") as f:
+            f.write(rows_to_csv(MATCHES_HEADER, rows))
+
+    def delete_match(self, match_id):
+        match_id = str(match_id)
+        with self._lock:
+            rows = self.read_matches()
+            kept = [r for r in rows if str(r.get("id")) != match_id]
+            if len(kept) == len(rows):
+                return False  # id not found
+            self._rewrite_matches(kept)
+        self._git_commit(f"delete match {match_id}")
+        return True
+
+    def update_match(self, match_id, fields):
+        match_id = str(match_id)
+        with self._lock:
+            rows = self.read_matches()
+            found = _apply_match_update(rows, match_id, fields)
+            if not found:
+                return False
+            self._rewrite_matches(rows)
+        self._git_commit(f"edit match {match_id}")
+        return True
 
     def _git_commit(self, message):
         """Best-effort commit of data/. Any failure is swallowed."""
@@ -382,6 +432,27 @@ class GitHubStore(Store):
                 "recorded_by": row["recorded_by"],
             }
             return (rows + [full], new_id, f"match {new_id}")
+
+        return self._modify_file(self.matches_path, MATCHES_HEADER, mutate)
+
+    def delete_match(self, match_id):
+        match_id = str(match_id)
+
+        def mutate(rows):
+            kept = [r for r in rows if str(r.get("id")) != match_id]
+            if len(kept) == len(rows):
+                return (None, False, None)  # id not found; no write
+            return (kept, True, f"delete match {match_id}")
+
+        return self._modify_file(self.matches_path, MATCHES_HEADER, mutate)
+
+    def update_match(self, match_id, fields):
+        match_id = str(match_id)
+
+        def mutate(rows):
+            if not _apply_match_update(rows, match_id, fields):
+                return (None, False, None)  # id not found; no write
+            return (rows, True, f"edit match {match_id}")
 
         return self._modify_file(self.matches_path, MATCHES_HEADER, mutate)
 
