@@ -220,6 +220,9 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_matrix(matches, roster, who, is_trial))
 
+    if path == "/how":
+        return _html(core.render_how(who, is_trial))
+
     if path == "/record":
         roster = core.roster_names(store.read_players(), extra)
         return _html(core.render_record(roster, who, trial=is_trial))

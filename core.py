@@ -852,6 +852,7 @@ def _tab_bar(active):
         ("board", "/scores", "&#128202;", "Board"),
         ("matrix", "/matrix", "&#128200;", "Matrix"),
         ("history", "/history", "&#128340;", "History"),
+        ("how", "/how", "&#129299;", "Nerd"),
     ]
     links = "".join(
         f"<a class='{'active' if key == active else ''}' href='{href}'>"
@@ -1503,6 +1504,100 @@ def render_matrix(matches, roster=None, who=None, trial=False):
         "<h2 style='margin-top:24px'>Head-to-head</h2>" + h2h_table
     )
     return base_page("Matrix — Foosball Tracker", body, trial=trial, tabs="matrix")
+
+
+def render_how(who=None, trial=False):
+    """The 'Nerd' tab: a plain-language explainer of the rating computation."""
+    body = (
+        "<a class='backlink' href='/'>&#8249; Home</a>"
+        "<h1>How the ratings work &#129299;</h1>"
+        "<p class='muted'>Everything below is recomputed from the full match log "
+        "every time a page loads &mdash; so fixing or deleting a game "
+        "instantly corrects every number.</p>"
+
+        "<div class='card'>"
+        "<h2>1. Two separate ladders</h2>"
+        "<p><strong>Singles (1v1)</strong> and <strong>Doubles (2v2)</strong> are "
+        "tracked completely independently &mdash; separate ELO, W&#8211;L, peak, "
+        "streak and weeks-at-#1. A 1v1 result never touches your doubles rating and "
+        "vice-versa. New players start at a chosen <strong>seed</strong> rating "
+        "(default 1000) set when they first register, one per ladder.</p>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>2. Favourite vs underdog</h2>"
+        "<p>Each side has a rating: in singles it's the player's; in doubles it's the "
+        "<strong>average</strong> of the two teammates. The higher-rated side is the "
+        "<strong>favourite</strong>, the lower the <strong>underdog</strong> (a tie "
+        "makes both favourite). The <strong>gap</strong> is the difference between the "
+        "two side ratings.</p>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>3. The gap decides the stakes</h2>"
+        "<p>The gap picks a bucket giving each role a base point value <strong>X</strong>:</p>"
+        "<table><thead><tr><th>Rating gap</th><th>Favourite X</th><th>Underdog X</th></tr></thead>"
+        "<tbody>"
+        "<tr><td>0&#8211;50 (even)</td><td>20</td><td>20</td></tr>"
+        "<tr><td>51&#8211;150</td><td>15</td><td>25</td></tr>"
+        "<tr><td>151&#8211;300</td><td>10</td><td>30</td></tr>"
+        "<tr><td>301+</td><td>5</td><td>35</td></tr>"
+        "</tbody></table>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>4. Points move as a zero-sum transfer</h2>"
+        "<p>Whoever wins, the loser loses <em>exactly</em> what the winner gains, and "
+        "that amount is the <strong>winner's</strong> role X. So an <strong>upset</strong> "
+        "(underdog wins) moves the big underdog X both ways; an <strong>expected win</strong> "
+        "moves the small favourite X. In doubles both teammates move by the same amount.</p>"
+        "<p class='muted'>Example &mdash; a 1200 favourite vs a 1000 underdog (gap 200 &rarr; "
+        "favX&nbsp;10, underX&nbsp;30): expected win &rarr; +10&nbsp;/&nbsp;&minus;10; "
+        "upset &rarr; underdog +30&nbsp;/&nbsp;favourite &minus;30. The bigger the gap, the "
+        "less an expected win is worth and the more an upset pays.</p>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>5. Score margin (new games only)</h2>"
+        "<p>For matches played <strong>from 18&nbsp;Jul&nbsp;2026 onward</strong>, the "
+        "transfer is scaled by the winning margin (games are win-by-2, so the closest is "
+        "10&#8211;8). Earlier games are <strong>locked</strong> to their original values.</p>"
+        "<p><code>multiplier = 0.6 + 0.1 &times; margin</code></p>"
+        "<table><thead><tr><th>Score</th><th>Margin</th><th>&times; multiplier</th></tr></thead>"
+        "<tbody>"
+        "<tr><td>10&#8211;8</td><td>2</td><td>0.8</td></tr>"
+        "<tr><td>10&#8211;6</td><td>4</td><td>1.0 (par)</td></tr>"
+        "<tr><td>10&#8211;3</td><td>7</td><td>1.3</td></tr>"
+        "<tr><td>10&#8211;0</td><td>10</td><td>1.6</td></tr>"
+        "</tbody></table>"
+        "<p class='muted'>So a 10&#8211;0 blowout moves twice as many points as a 10&#8211;8 "
+        "nail-biter. Still zero-sum. Older games ignore the score entirely.</p>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>6. The other stats</h2>"
+        "<ul>"
+        "<li><strong>Peak</strong> &mdash; your highest rating ever reached on that ladder.</li>"
+        "<li><strong>W&#8211;L / win%</strong> &mdash; your record on that ladder.</li>"
+        "<li><strong>Streak</strong> &mdash; current run of wins (W) or losses (L).</li>"
+        "<li><strong>Weeks at #1</strong> &mdash; you need &ge;3 games to qualify; whoever is "
+        "top-rated at the end of each calendar week gets that week. Your page also shows your "
+        "<em>longest</em> and <em>current</em> reign (consecutive weeks at #1).</li>"
+        "</ul>"
+        "</div>"
+
+        "<div class='card'>"
+        "<h2>7. The matrices</h2>"
+        "<p><strong>Partner synergy</strong> &mdash; win% for each pair when they play "
+        "doubles together. <strong>Head-to-head</strong> &mdash; each player's win% against "
+        "each other player when on opposing sides. A cell appears once a pair has played once.</p>"
+        "</div>"
+
+        "<p class='muted' style='margin-top:8px'>That's the whole system: gap &rarr; role X "
+        "&rarr; zero-sum transfer &rarr; scaled by margin (new games). Nothing is hidden or "
+        "hand-tuned per player.</p>"
+    )
+    return base_page("How ratings work — Foosball Tracker", body, who, trial=trial, tabs="how")
 
 
 def render_breakdown(bd, who=None, trial=False):
