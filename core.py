@@ -34,7 +34,7 @@ MATCHES_HEADER = [
 
 START_RATING = 1000.0    # default seed for unseeded players
 MIN_GAMES_FOR_TOP = 3   # must have played >= this many games to qualify as #1
-MIN_MATRIX_GAMES = 2    # min shared games before a matrix cell is meaningful
+MIN_MATRIX_GAMES = 1    # min shared games before a matrix cell is shown (else faded "—")
 
 # New players may register with a chosen starting rating (seed_elo). A missing
 # or blank seed reads as DEFAULT_SEED; registration input is clamped to bounds.
@@ -1234,11 +1234,11 @@ def render_matrix(matches, roster=None, who=None, trial=False):
         best_html = "<h3>Best partnerships</h3>" + rank_list(best)
         worst_html = "<h3>Worst partnerships</h3>" + rank_list(worst)
     else:
-        best_html = worst_html = ("<p class='muted'>Not enough 2v2 pairings "
-                                  "(need &ge; 2 games together).</p>")
+        best_html = worst_html = ("<p class='muted'>No 2v2 pairings yet "
+                                  "(need &ge; 1 game together).</p>")
 
     legend = ("<p class='muted'>Cells: row's win% vs column. Hover for W-L and "
-              "games. &mdash; = fewer than 2 shared games. "
+              "games. &mdash; = not played yet. "
               "Heat: <span style='color:hsl(0,62%,42%)'>&#9632;</span> low "
               "&rarr; <span style='color:hsl(120,62%,42%)'>&#9632;</span> high.</p>")
 
