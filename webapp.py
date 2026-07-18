@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""
+webapp.py — transport-agnostic request handling for the Foosball Tracker.
+
+`handle(method, path, query, cookies, body, store)` does ALL routing,
+validation, cookie/auth work, and rendering, returning
+`(status, headers, body_bytes)`. Both entry points call it:
+  * app.py           — local LAN ThreadingHTTPServer
+  * api/index.py      — Vercel serverless handler
+
+State that used to live on disk / in process memory is now stateless:
+  * cookie signing key comes from store.get_secret() (APP_SECRET env / file)
+  * the `who` cookie is an HMAC-signed JSON blob {"n": name}
+  * trial mode is entirely in a signed `trial` cookie (see TRIAL SCHEMA below)
+Nothing about trial mode ever touches the store / GitHub.
+
+TRIAL COOKIE SCHEMA (HMAC-signed, base64url JSON):
+    {"trial": true, "name": <str>, "sample": <bool>, "matches": [ <match rows> ]}
+  - `sample` true  -> layer core.sample_matches() into the trial view
+    (the 40 deterministic rows are regenerated, NOT stored in the cookie).
+  - `matches`      -> only the user's own hand-recorded trial matches ride in
+    the cookie, capped at TRIAL_MATCH_CAP (oldest dropped past the cap).
+  Effective trial extra = (sample_matches() if sample) + matches, layered over
+  the real matches from the store — same isolation contract as before.
+
+Python 3 standard library only.
+"""
+
+import base64
+import hashlib
+import hmac
+import http.cookies
+import json
+import urllib.parse
+from datetime import datetime
+
+import core
+from store import get_secret
+
+TRIAL_MATCH_CAP = 50  # bound cookie size (browsers cap a cookie near 4KB)
+COOKIE_ATTRS = "Path=/; Max-Age=31536000; SameSite=Lax"
+
+
+def _now_iso():
+    return datetime.now().astimezone().isoformat()
+
+
+# === Signed-cookie helpers ==================================================
+
+def _sign(raw_bytes):
+    return hmac.new(get_secret(), raw_bytes, hashlib.sha256).hexdigest()
+
+
+def encode_signed(payload):
+    """dict -> 'base64url(json).hexsig' (HMAC-SHA256 with the app secret)."""
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    b = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{b}.{_sign(raw)}"
+
+
+def decode_signed(token):
+    """Inverse of encode_signed; returns the dict, or None if tampered/invalid."""
+    if not token or "." not in token:
+        return None
+    b, _, sig = token.rpartition(".")
+    try:
+        pad = "=" * (-len(b) % 4)
+        raw = base64.urlsafe_b64decode(b + pad)
+    except Exception:
+        return None
+    if not hmac.compare_digest(_sign(raw), sig):
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _parse_cookies(cookie_header):
+    jar = http.cookies.SimpleCookie()
+    if cookie_header:
+        try:
+            jar.load(cookie_header)
+        except http.cookies.CookieError:
+            pass
+    return jar
+
+
+def _get_who(jar):
+    if "who" not in jar:
+        return None
+    payload = decode_signed(jar["who"].value)
+    if isinstance(payload, dict):
+        name = payload.get("n")
+        return name if name else None
+    return None
+
+
+def _get_trial(jar):
+    if "trial" not in jar:
+        return None
+    payload = decode_signed(jar["trial"].value)
+    if isinstance(payload, dict) and payload.get("trial"):
+        return payload
+    return None
+
+
+def _set_cookie(name, value):
+    return f"{name}={value}; {COOKIE_ATTRS}"
+
+
+def _clear_cookie(name):
+    return f"{name}=; Path=/; Max-Age=0"
+
+
+def _who_cookie(name):
+    return _set_cookie("who", encode_signed({"n": name}))
+
+
+def _trial_cookie(payload):
+    return _set_cookie("trial", encode_signed(payload))
+
+
+def _trial_extra_matches(trial):
+    """Effective trial match set = sample (if enabled) + user's own matches."""
+    extra = []
+    if trial.get("sample"):
+        extra.extend(core.sample_matches())
+    extra.extend(trial.get("matches") or [])
+    return extra
+
+
+# === Response builders ======================================================
+
+def _html(html_str, status=200, cookies=None):
+    data = html_str.encode("utf-8")
+    headers = [
+        ("Content-Type", "text/html; charset=utf-8"),
+        ("Content-Length", str(len(data))),
+    ]
+    for c in (cookies or []):
+        headers.append(("Set-Cookie", c))
+    return status, headers, data
+
+
+def _redirect(location, cookies=None):
+    headers = [("Location", location), ("Content-Length", "0")]
+    for c in (cookies or []):
+        headers.append(("Set-Cookie", c))
+    return 303, headers, b""
+
+
+# === Request handling =======================================================
+
+def handle(method, path, query, cookies, body, store):
+    """
+    Transport-agnostic entry point. Returns (status:int,
+    headers:list[(k,v)], body:bytes). `query` is the raw query string,
+    `cookies` the raw Cookie header (or None), `body` the raw request bytes.
+    """
+    jar = _parse_cookies(cookies)
+    who = _get_who(jar)
+    trial = _get_trial(jar)
+    is_trial = trial is not None
+    extra = _trial_extra_matches(trial) if is_trial else None
+
+    if method == "GET":
+        return _handle_get(path, query, store, who, trial, is_trial, extra)
+    if method == "POST":
+        form = urllib.parse.parse_qs(
+            body.decode("utf-8") if body else "", keep_blank_values=True)
+        return _handle_post(path, form, store, who, trial, is_trial, extra)
+    return _html(core.render_not_found(who, is_trial), 405)
+
+
+def _seed_map(players):
+    """{name: seed_elo(int)} from stored player rows (already normalized)."""
+    return {p["name"]: p.get("seed_elo", core.DEFAULT_SEED) for p in players}
+
+
+def _handle_get(path, query, store, who, trial, is_trial, extra):
+    if path == "/":
+        players = store.read_players()
+        names = [p["name"] for p in players]
+        matches = store.read_matches() + (extra or [])
+        return _html(core.render_index(matches, names, who, is_trial,
+                                       seed_map=_seed_map(players)))
+
+    if path == "/login":
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_login(roster, who, is_trial))
+
+    if path == "/trial":
+        q = urllib.parse.parse_qs(query)
+        name = (q.get("name", [""])[0]).strip() or "Guest"
+        payload = {"trial": True, "name": name, "sample": False, "matches": []}
+        return _redirect("/", [_who_cookie(name), _trial_cookie(payload)])
+
+    if path == "/logout":
+        return _redirect("/", [_clear_cookie("who"), _clear_cookie("trial")])
+
+    if path == "/matrix":
+        matches = store.read_matches() + (extra or [])
+        return _html(core.render_matrix(matches, who, is_trial))
+
+    if path == "/record":
+        if not who:
+            return _redirect("/login")
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_record(roster, who, trial=is_trial))
+
+    if path == "/player":
+        q = urllib.parse.parse_qs(query)
+        name = (q.get("name", [""])[0]).strip()
+        if not name:
+            return _redirect("/")
+        players = store.read_players()
+        names = [p["name"] for p in players]
+        matches = store.read_matches() + (extra or [])
+        html_out, status = core.render_player(matches, names, name, who, is_trial,
+                                              seed_map=_seed_map(players))
+        return _html(html_out, status)
+
+    return _html(core.render_not_found(who, is_trial), 404)
+
+
+def _handle_post(path, form, store, who, trial, is_trial, extra):
+    if path == "/login":
+        return _post_login(form, store, trial)
+    if path == "/record":
+        return _post_record(form, store, who, trial, is_trial, extra)
+    if path == "/trial/load-sample":
+        return _post_sample(trial, load=True)
+    if path == "/trial/clear-sample":
+        return _post_sample(trial, load=False)
+    return _html(core.render_not_found(who, is_trial), 404)
+
+
+def _post_login(form, store, trial):
+    name = (form.get("name", [""])[0]).strip()
+    if not name:
+        roster = core.roster_names(store.read_players())
+        return _html(core.render_login(roster, None), 400)
+    # Parse the chosen starting ELO: non-numeric -> default; clamp to bounds.
+    # Ignored by the store if the (case-insensitive) name already exists.
+    raw = (form.get("seed_elo", [""])[0]).strip()
+    try:
+        seed = int(raw)
+    except (TypeError, ValueError):
+        seed = core.DEFAULT_SEED
+    seed = max(core.SEED_MIN, min(core.SEED_MAX, seed))
+    canonical = store.write_player(name, seed)
+    # A real login exits any trial session (clear the trial cookie).
+    return _redirect("/", [_who_cookie(canonical), _clear_cookie("trial")])
+
+
+def _post_record(form, store, who, trial, is_trial, extra):
+    if not who:
+        return _redirect("/login")
+
+    fmt = (form.get("format", ["1v1"])[0]).strip()
+    values = {k: (form.get(k, [""])[0]).strip()
+              for k in ("a1", "a2", "b1", "b2", "score_a", "score_b")}
+
+    def fail(msg):
+        roster = core.roster_names(store.read_players(), extra)
+        return _html(core.render_record(roster, who, error=msg, fmt=fmt,
+                                        values=values, trial=is_trial), 400)
+
+    # --- Validate format & assemble teams. ---
+    if fmt not in ("1v1", "2v2"):
+        return fail("Invalid format.")
+    if fmt == "1v1":
+        team_a = [values["a1"]]
+        team_b = [values["b1"]]
+    else:
+        team_a = [values["a1"], values["a2"]]
+        team_b = [values["b1"], values["b2"]]
+
+    if any(not n for n in team_a + team_b):
+        return fail("All player slots must be filled.")
+
+    lowered = [n.lower() for n in team_a + team_b]
+    if len(set(lowered)) != len(lowered):
+        return fail("All players must be distinct.")
+
+    # --- Validate scores. ---
+    try:
+        score_a = int(values["score_a"])
+        score_b = int(values["score_b"])
+    except (TypeError, ValueError):
+        return fail("Scores must be whole numbers.")
+    if score_a < 0 or score_b < 0:
+        return fail("Scores must be non-negative.")
+    if score_a == score_b:
+        return fail("Ties are not allowed — one side must win.")
+
+    if is_trial:
+        # Canonicalize against known players WITHOUT creating any; append to the
+        # signed trial cookie. Nothing touches the store / GitHub.
+        players = store.read_players()
+        team_a = [core.canonical_name(players, n) for n in team_a]
+        team_b = [core.canonical_name(players, n) for n in team_b]
+        matches = list(trial.get("matches") or [])
+        new_id = f"tu-{len(matches) + 1}"
+        matches.append({
+            "id": new_id,
+            "timestamp_iso": _now_iso(),
+            "format": fmt,
+            "team_a": ";".join(team_a),
+            "team_b": ";".join(team_b),
+            "score_a": str(score_a),
+            "score_b": str(score_b),
+            "recorded_by": who,
+        })
+        if len(matches) > TRIAL_MATCH_CAP:
+            matches = matches[-TRIAL_MATCH_CAP:]  # drop oldest to bound size
+        payload = dict(trial)
+        payload["matches"] = matches
+        # Breakdown over the trial-layered ratings; re-set the trial cookie.
+        all_matches = store.read_matches() + _trial_extra_matches(payload)
+        bd = core.match_breakdown(all_matches, [p["name"] for p in players],
+                                  _seed_map(players), new_id)
+        return _html(core.render_breakdown(bd, who, trial=True),
+                     cookies=[_trial_cookie(payload)])
+
+    # --- Normal: canonicalize / auto-create players, then persist. ---
+    team_a = [store.write_player(n) for n in team_a]
+    team_b = [store.write_player(n) for n in team_b]
+    new_id = store.append_match({
+        "timestamp_iso": _now_iso(),
+        "format": fmt,
+        "team_a": ";".join(team_a),
+        "team_b": ";".join(team_b),
+        "score_a": score_a,
+        "score_b": score_b,
+        "recorded_by": who,
+    })
+    # Always show the result breakdown (old->new / role / X, doubles detail).
+    players = store.read_players()
+    bd = core.match_breakdown(store.read_matches(), [p["name"] for p in players],
+                              _seed_map(players), new_id)
+    return _html(core.render_breakdown(bd, who, trial=False))
+
+
+def _post_sample(trial, load):
+    """
+    Load (sample=true) or clear (sample=false) the sample dataset in the trial
+    cookie. Both reset the user's own trial matches, matching the original
+    reset-then-load / clear semantics. Requires an active trial cookie.
+    """
+    if trial is None:
+        return _redirect("/login")
+    payload = dict(trial)
+    payload["sample"] = bool(load)
+    payload["matches"] = []
+    return _redirect("/", [_trial_cookie(payload)])
+
+
+# === BaseHTTPRequestHandler adapter (shared by app.py + api/index.py) =======
+
+def serve_via_bhrh(request_handler, method, store):
+    """
+    Drive `handle(...)` from a BaseHTTPRequestHandler instance and write the
+    response. Used by both the local server and the Vercel serverless handler.
+    """
+    parsed = urllib.parse.urlparse(request_handler.path)
+    try:
+        length = int(request_handler.headers.get("Content-Length", 0) or 0)
+    except (TypeError, ValueError):
+        length = 0
+    body = request_handler.rfile.read(length) if length else b""
+    cookie_header = request_handler.headers.get("Cookie")
+
+    status, headers, out = handle(
+        method, parsed.path, parsed.query, cookie_header, body, store)
+
+    request_handler.send_response(status)
+    for key, value in headers:
+        request_handler.send_header(key, value)
+    request_handler.end_headers()
+    if out:
+        request_handler.wfile.write(out)

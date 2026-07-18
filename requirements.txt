@@ -1,0 +1,2 @@
+# No third-party dependencies — Python standard library only.
+# (Present so Vercel detects the Python runtime for api/*.py.)
