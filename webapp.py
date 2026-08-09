@@ -270,12 +270,14 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         name = (q.get("name", [""])[0]).strip()
         if not name:
             return _redirect("/")
+        board = (q.get("board", ["singles"])[0]).strip().lower()
         players = store.read_players()
         names = [p["name"] for p in players]
         matches = store.read_matches() + (extra or [])
         s_map, d_map = _seed_maps(players)
         html_out, status = core.render_player(matches, names, name, who, is_trial,
-                                              seed_singles=s_map, seed_doubles=d_map)
+                                              seed_singles=s_map, seed_doubles=d_map,
+                                              board=board)
         return _html(html_out, status)
 
     return _html(core.render_not_found(who, is_trial), 404)

@@ -21,6 +21,7 @@ Python 3 standard library only.
 import difflib
 import html
 import json
+import math
 import random
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -564,6 +565,88 @@ def compute_deltas(matches, roster=None, seed_map=None, fmt=None):
     return deltas
 
 
+def player_rating_series(matches, name, roster=None, seed_map=None, fmt=None):
+    """
+    Pure: replay ONE rating track exactly like compute_stats (same sort key, same
+    `fmt` filter, same seed handling, same skip rules, same margin-multiplier era
+    gating) and return `name`'s own rating points, chronological:
+
+        [{rating_after, delta, won, date, when, opponents, partners, score_str}]
+
+    Because the replay is identical, the LAST point's `rating_after` is exactly
+    compute_stats(...)["players"][name]["elo"] for the same (fmt, seed_map) —
+    the curve and the stat card can never disagree. Matches the replay skips
+    (empty teams / unparseable scores) are absent here too, and matches `name`
+    didn't play are replayed but not recorded.
+    """
+    matches = list(matches or [])
+    if fmt:
+        matches = [m for m in matches if match_format(m) == fmt]
+    matches.sort(key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
+
+    seed_map = seed_map or {}
+
+    def seed_of(n):
+        try:
+            return float(seed_map.get(n, START_RATING))
+        except (TypeError, ValueError):
+            return START_RATING
+
+    ratings = {}
+    for n in set(roster or []) | set(seed_map.keys()):
+        ratings.setdefault(n, seed_of(n))
+
+    def rget(n):
+        return ratings.get(n, seed_of(n))
+
+    key = (name or "").strip().lower()
+    points = []
+    for m in matches:
+        team_a = _parse_team(m.get("team_a"))
+        team_b = _parse_team(m.get("team_b"))
+        if not team_a or not team_b:
+            continue
+        try:
+            score_a = int(m.get("score_a"))
+            score_b = int(m.get("score_b"))
+        except (TypeError, ValueError):
+            continue
+        for n in team_a + team_b:
+            ratings.setdefault(n, seed_of(n))
+
+        rating_a = sum(rget(n) for n in team_a) / len(team_a)
+        rating_b = sum(rget(n) for n in team_b) / len(team_b)
+        a_won = score_a > score_b
+        sm = margin_multiplier(score_a, score_b) if match_scored(m) else 1.0
+        a_delta, b_delta, _meta = rating_delta(rating_a, rating_b, a_won, score_mult=sm)
+
+        for n in team_a:
+            ratings[n] = rget(n) + a_delta
+        for n in team_b:
+            ratings[n] = rget(n) + b_delta
+
+        low_a = [x.strip().lower() for x in team_a]
+        low_b = [x.strip().lower() for x in team_b]
+        if key not in low_a and key not in low_b:
+            continue
+        on_a = key in low_a
+        my_team = team_a if on_a else team_b
+        opp_team = team_b if on_a else team_a
+        mine = next(n for n in my_team if n.strip().lower() == key)
+        ts = m.get("timestamp_iso") or ""
+        points.append({
+            "rating_after": ratings[mine],
+            "delta": a_delta if on_a else b_delta,
+            "won": a_won if on_a else not a_won,
+            "date": ts[:10],
+            "when": ts[:16].replace("T", " "),
+            "opponents": list(opp_team),
+            "partners": [p for p in my_team if p.strip().lower() != key],
+            "score_str": f"{score_a if on_a else score_b}–{score_b if on_a else score_a}",
+        })
+    return points
+
+
 def match_breakdown(matches, roster=None, seed_map=None, match_id=None, fmt=None):
     """
     Replay only the `fmt`-format matches and return the rating breakdown for the
@@ -950,6 +1033,34 @@ h1 { font-size: 1.5rem; margin: 4px 0 14px; }
   .badge.works { background: #3a2e12; border-color: #78591c; color: #fcd34d; }
   .badge.done { background: #14302a; border-color: #14532d; color: #6ee7b7; }
   .replies, .replies li { border-color: #374151; }
+}
+
+/* ===== rating progress curve (server-rendered inline SVG) =====
+   Colors live here, not on the elements, so the dark block below can swap
+   them. The default line #2563eb fails 3:1 contrast on the dark card
+   surface, hence the lighter #60a5fa there. Win/loss is carried by SHAPE
+   (filled vs hollow) as well as hue: green/red alone fails colorblind
+   separation, and the "ring" is painted in the card surface color so points
+   stay separable where the line passes behind them. */
+.chart-wrap { overflow-x: auto; margin: 6px 0 2px; }
+.chart-wrap svg { display: block; min-width: 100%; }
+.pg-line { fill: none; stroke: #2563eb; stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
+.pg-grid { stroke: #eee; stroke-width: 1; }
+.pg-band { stroke: #eee; stroke-width: 1; }
+.pg-seed { stroke: #9ca3af; stroke-width: 1; stroke-dasharray: 3 3; fill: none; }
+.pg-txt { fill: #6b7280; font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.pg-peak { fill: none; stroke: #6b7280; stroke-width: 1; }
+.pg-w { fill: #16a34a; stroke: #fff; stroke-width: 2; }
+.pg-l { fill: #fff; stroke: #dc2626; stroke-width: 2; }
+@media (prefers-color-scheme: dark) {
+  .pg-line { stroke: #60a5fa; }
+  .pg-grid, .pg-band { stroke: #374151; }
+  .pg-txt { fill: #9ca3af; }
+  .pg-peak { stroke: #9ca3af; }
+  .pg-w { fill: #22c55e; stroke: #1f2937; }
+  .pg-l { fill: #1f2937; stroke: #f87171; }
 }
 """
 
@@ -1451,6 +1562,165 @@ def _zero_stat(name, seed):
             "weeks_at_top": 0, "longest_reign": 0, "current_reign": 0}
 
 
+# --- rating progress curve --------------------------------------------------
+# Geometry constants. The x axis is a sequence of equal-width DAY BANDS (one per
+# calendar day that actually had games) rather than a linear time axis: a day
+# with 3 games and a day with 1 game get the same width, so a busy evening never
+# squashes the rest of the season. Within its band a day's k points sit at
+# fractions (i+0.5)/k, so up to ~5 games/day stay comfortably apart; more than
+# that squashes inside that one band only.
+PG_DAY_W = 70      # px per day band
+PG_PAD_L = 34      # left pad = the seed lead-in runway
+PG_PAD_R = 44      # right pad = room for the y labels (visible after autoscroll)
+PG_H = 220
+PG_PAD_T = 16
+PG_PAD_B = 26      # room for the date labels under each band
+
+
+def _nice_ticks(lo, hi, target=4):
+    """~`target` gridline values at round numbers inside [lo, hi]."""
+    span = max(hi - lo, 1e-9)
+    raw = span / max(target, 1)
+    step = 10000
+    for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000):
+        if s >= raw:
+            step = s
+            break
+    ticks = []
+    v = math.ceil(lo / step) * step
+    while v <= hi + 1e-9 and len(ticks) < 12:
+        ticks.append(v)
+        v += step
+    return ticks
+
+
+def _progress_svg(series, seed):
+    """
+    Inline SVG rating curve for ONE track. Pure string building — no JS chart
+    library, no external assets. `series` is player_rating_series() output
+    (chronological, >= 1 point); `seed` is that track's starting rating, drawn
+    as a dashed baseline and as the lead-in the curve starts from.
+    """
+    # Group into day bands (series is chronological, so runs are contiguous).
+    days = []
+    for p in series:
+        if days and days[-1][0] == p["date"]:
+            days[-1][1].append(p)
+        else:
+            days.append((p["date"], [p]))
+
+    n_days = len(days)
+    width = PG_PAD_L + n_days * PG_DAY_W + PG_PAD_R
+    plot_r = width - PG_PAD_R           # right edge of the plotted area
+    plot_h = PG_H - PG_PAD_T - PG_PAD_B
+
+    seed = float(seed)
+    vals = [p["rating_after"] for p in series]
+    peak_val = max(vals + [seed])
+    lo, hi = min(vals + [seed]), max(vals + [seed, peak_val])
+    span = hi - lo
+    if span < 1e-9:
+        span = 1.0                       # flat series (e.g. a single point)
+    pad = span * 0.10
+    y0, y1 = lo - pad, hi + pad
+
+    def yy(v):
+        return PG_PAD_T + (y1 - v) / (y1 - y0) * plot_h
+
+    # x position of every point, band by band.
+    xs = []
+    for i, (_date, pts) in enumerate(days):
+        base = PG_PAD_L + i * PG_DAY_W
+        k = len(pts)
+        for j in range(k):
+            xs.append(base + (j + 0.5) / k * PG_DAY_W)
+
+    parts = [f"<svg width='{width}' height='{PG_H}' role='img' "
+             f"aria-label='Rating progress'>"]
+
+    # Gridlines + right-edge labels (recessive; never the line color).
+    for t in _nice_ticks(y0, y1):
+        gy = yy(t)
+        parts.append(f"<line class='pg-grid' x1='0' y1='{gy:.1f}' "
+                     f"x2='{plot_r}' y2='{gy:.1f}'/>")
+        parts.append(f"<text class='pg-txt' x='{plot_r + 6}' y='{gy + 3:.1f}'>"
+                     f"{int(round(t))}</text>")
+
+    # Day band separators + date labels.
+    for i, (date, _pts) in enumerate(days):
+        base = PG_PAD_L + i * PG_DAY_W
+        if i > 0:
+            parts.append(f"<line class='pg-band' x1='{base}' y1='{PG_PAD_T - 8}' "
+                         f"x2='{base}' y2='{PG_H - PG_PAD_B + 4}'/>")
+        label = date[5:] if len(date) >= 10 else date
+        parts.append(f"<text class='pg-txt' x='{base + PG_DAY_W / 2:.1f}' "
+                     f"y='{PG_H - 8}' text-anchor='middle'>{esc(label)}</text>")
+
+    # Seed baseline.
+    ys = yy(seed)
+    parts.append(f"<line class='pg-seed' x1='0' y1='{ys:.1f}' "
+                 f"x2='{plot_r}' y2='{ys:.1f}'/>")
+    sl_y = min(max(ys - 5, PG_PAD_T + 8), PG_H - PG_PAD_B - 2)
+    parts.append(f"<text class='pg-txt' x='2' y='{sl_y:.1f}'>"
+                 f"seed {int(round(seed))}</text>")
+
+    # The curve itself: lead-in from the left edge at the seed, then the points.
+    pl = [f"0,{ys:.1f}"] + [f"{x:.1f},{yy(p['rating_after']):.1f}"
+                            for x, p in zip(xs, series)]
+    parts.append(f"<polyline class='pg-line' points='{' '.join(pl)}'/>")
+
+    # Peak: ring + direct label. Only when a played point (not the seed) is the
+    # high-water mark — otherwise the dashed seed line already says it.
+    best = max(range(len(series)), key=lambda i: series[i]["rating_after"])
+    if series[best]["rating_after"] >= seed:
+        bx, by = xs[best], yy(series[best]["rating_after"])
+        parts.append(f"<circle class='pg-peak' cx='{bx:.1f}' cy='{by:.1f}' r='8'/>")
+        peak_txt = f"peak {int(round(series[best]['rating_after']))}"
+        if best == len(series) - 1:
+            # Last point: push the label up-LEFT so it clears the ring and the y
+            # labels that sit just past the plot edge (the top pad is only 16px,
+            # so a centered label there would collide with the ring).
+            parts.append(f"<text class='pg-txt' x='{bx - 11:.1f}' "
+                         f"y='{max(by - 9, 9):.1f}' "
+                         f"text-anchor='end'>{peak_txt}</text>")
+        else:
+            # -14 clears the r=8 ring; the top pad absorbs the overflow.
+            parts.append(f"<text class='pg-txt' x='{bx:.1f}' "
+                         f"y='{max(by - 14, 9):.1f}' "
+                         f"text-anchor='middle'>{peak_txt}</text>")
+
+    # Points last so they sit on top of the line. Win = filled, loss = hollow.
+    for x, p in zip(xs, series):
+        cy = yy(p["rating_after"])
+        cls = "pg-w" if p["won"] else "pg-l"
+        opp = ", ".join(p["opponents"])
+        partners = (" (+ " + ", ".join(p["partners"]) + ")") if p["partners"] else ""
+        d = int(round(p["delta"]))
+        tip = (f"{'W' if p['won'] else 'L'} {p['score_str']} vs {opp}{partners}"
+               f" · {int(round(p['rating_after']))} ({d:+d}) · {p['when']}")
+        parts.append(f"<circle class='{cls}' cx='{x:.1f}' cy='{cy:.1f}' r='4'>"
+                     f"<title>{esc(tip)}</title></circle>")
+
+    parts.append("</svg>")
+    # Scroll to the newest games on load (the axis grows to the right).
+    return ("<div class='chart-wrap' id='pgwrap'>" + "".join(parts) + "</div>"
+            "<script>(function(){var w=document.getElementById('pgwrap');"
+            "if(w){w.scrollLeft=w.scrollWidth;}})();</script>")
+
+
+def _progress_card(series, seed, label):
+    """The Progress card: the curve, or a muted note when the track is empty."""
+    if series:
+        chart = _progress_svg(series, seed)
+        note = ("<p class='muted'>Filled = win, hollow = loss. "
+                "Each column is one day you played. Tap a point for details.</p>")
+    else:
+        chart = f"<p class='muted'>No {label} games yet.</p>"
+        note = ""
+    return ("<div class='card'><h3 style='margin-top:0'>Progress</h3>"
+            + chart + note + "</div>")
+
+
 def _player_stat_block(heading, stat):
     reign_detail = ""
     if stat["weeks_at_top"] > 0:
@@ -1473,7 +1743,13 @@ def _player_stat_block(heading, stat):
 
 
 def render_player(matches, roster, name, who=None, trial=False,
-                  seed_singles=None, seed_doubles=None):
+                  seed_singles=None, seed_doubles=None, board="singles"):
+    """
+    One player, ONE rating track at a time. `board` ('singles'|'doubles', same
+    param as /scores) picks the track: the stat card, the progress curve and the
+    match history all show that format only, so the page never mixes two rating
+    worlds that were computed independently.
+    """
     singles = compute_stats(matches, roster, seed_map=seed_singles, fmt="1v1")
     doubles = compute_stats(matches, roster, seed_map=seed_doubles, fmt="2v2")
     key = name.strip().lower()
@@ -1492,14 +1768,33 @@ def render_player(matches, roster, name, who=None, trial=False,
                 f"<p class='muted'>No player named “{esc(name)}”.</p>")
         return base_page("Player — Foosball Tracker", body, trial=trial), 404
 
-    s_seed = (seed_singles or {}).get(canonical, DEFAULT_SEED)
-    d_seed = (seed_doubles or {}).get(canonical, DEFAULT_SEED)
-    s_stat = singles["players"].get(canonical, _zero_stat(canonical, s_seed))
-    d_stat = doubles["players"].get(canonical, _zero_stat(canonical, d_seed))
+    board = "doubles" if board == "doubles" else "singles"
+    if board == "doubles":
+        fmt, seed_map, heading, track_word = "2v2", seed_doubles, "Doubles (2v2)", "doubles"
+        seed = (seed_doubles or {}).get(canonical, DEFAULT_SEED)
+        stat = doubles["players"].get(canonical, _zero_stat(canonical, seed))
+    else:
+        fmt, seed_map, heading, track_word = "1v1", seed_singles, "Singles (1v1)", "singles"
+        seed = (seed_singles or {}).get(canonical, DEFAULT_SEED)
+        stat = singles["players"].get(canonical, _zero_stat(canonical, seed))
 
-    # Combined match history (both formats), most recent first.
-    deltas = _both_track_deltas(matches, roster, seed_singles, seed_doubles)
-    all_matches = sorted(matches or [],
+    qname = urllib.parse.quote(canonical)
+    seg = (
+        "<div class='seg'>"
+        f"<a class='{'active' if board == 'singles' else ''}' "
+        f"href='/player?name={qname}&amp;board=singles'>Singles</a>"
+        f"<a class='{'active' if board == 'doubles' else ''}' "
+        f"href='/player?name={qname}&amp;board=doubles'>Doubles</a>"
+        "</div>"
+    )
+
+    series = player_rating_series(matches, canonical, roster,
+                                  seed_map=seed_map, fmt=fmt)
+    progress = _progress_card(series, seed, track_word)
+
+    # Match history for THIS track only, most recent first.
+    deltas = compute_deltas(matches, roster, seed_map=seed_map, fmt=fmt)
+    all_matches = sorted((m for m in (matches or []) if match_format(m) == fmt),
                          key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     hist = []
     for m in reversed(all_matches):
@@ -1544,14 +1839,9 @@ def render_player(matches, roster, name, who=None, trial=False,
             "</tr></thead><tbody>" + "".join(hist) + "</tbody></table>"
         )
     else:
-        hist_table = "<p class='muted'>No matches played yet.</p>"
+        hist_table = f"<p class='muted'>No {track_word} matches played yet.</p>"
 
-    blocks = (
-        "<div class='row2'>"
-        + _player_stat_block("Singles (1v1)", s_stat)
-        + _player_stat_block("Doubles (2v2)", d_stat)
-        + "</div>"
-    )
+    blocks = _player_stat_block(heading, stat)
     # Roster-only removal: offered for real stored players (never in trial, and
     # never for names that only exist inside trial/sample matches).
     on_roster = canonical.strip().lower() in {
@@ -1569,7 +1859,7 @@ def render_player(matches, roster, name, who=None, trial=False,
         )
     body = (
         "<a class='backlink' href='/scores'>&#8249; Back</a>"
-        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table + remove
+        f"<h1>{esc(canonical)}</h1>" + seg + blocks + progress + hist_table + remove
     )
     return base_page(f"{canonical} — Foosball Tracker", body, trial=trial), 200
 
