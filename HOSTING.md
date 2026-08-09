@@ -67,6 +67,8 @@ vercel               # link/deploy; follow prompts
 | `GITHUB_REPO` | **yes** | `you/foosball-data` | `owner/repo` of the **data** repo. |
 | `GITHUB_BRANCH` | no | `main` | Defaults to `main`. |
 | `GITHUB_DATA_PREFIX` | no | `data/` | Path prefix inside the data repo. Defaults to `data/`. |
+| `TELEGRAM_BOT_TOKEN` | no | `123456:AAE…` | Optional — Telegram DM on new feature requests (needs `TELEGRAM_CHAT_ID` too). |
+| `TELEGRAM_CHAT_ID` | no | `987654321` | Optional — Telegram DM on new feature requests (chat to send to). |
 
 Redeploy (or `vercel --prod`) after setting env vars. Selecting the backend is automatic: **GitHubStore** is used iff both `GITHUB_TOKEN` and `GITHUB_REPO` are present; otherwise **LocalStore**.
 

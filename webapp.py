@@ -35,6 +35,7 @@ import urllib.parse
 from datetime import datetime
 
 import core
+import notify
 from store import get_secret
 
 TRIAL_MATCH_CAP = 50  # bound cookie size (browsers cap a cookie near 4KB)
@@ -225,7 +226,9 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
 
     if path == "/record":
         roster = core.roster_names(store.read_players(), extra)
-        return _html(core.render_record(roster, who, trial=is_trial))
+        # Fresh form: prefill Team A slot 1 with the logged-in player (editable).
+        return _html(core.render_record(roster, who, values={"a1": who},
+                                        trial=is_trial))
 
     if path == "/history":
         # Needs the roster + both seed maps so the Δ column replays the two
@@ -546,6 +549,7 @@ def _post_request_new(form, store, who, is_trial):
             error="A title is required.",
             values={"title": title, "content": content}), 400)
     store.append_request({"author": who, "title": title, "content": content})
+    notify.notify_new_request(who, title, content)   # best-effort; never raises
     return _redirect("/requests")
 
 

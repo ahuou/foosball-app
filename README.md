@@ -113,6 +113,7 @@ core.py        # pure logic + HTML rendering (rating replay, matrices, sample da
 store.py       # storage abstraction: LocalStore (CSV + git) / GitHubStore (Contents API).
                #   get_store() picks the backend from env; get_secret() resolves cookie key.
 webapp.py      # transport-agnostic handle(method, path, query, cookies, body, store)
+notify.py      # optional best-effort Telegram DM on a new feature request
 app.py         # local ThreadingHTTPServer adapter  ->  python app.py
 api/index.py   # Vercel handler(BaseHTTPRequestHandler) adapter
 vercel.json    # rewrites all paths to api/index
@@ -124,6 +125,10 @@ secret.key     # local mode only; generated at runtime; git-ignored
 
 **Backend selection:** `GitHubStore` is used iff both `GITHUB_TOKEN` and `GITHUB_REPO`
 are set; otherwise `LocalStore`. So the same code runs unchanged on the LAN and on Vercel.
+
+**Notifications (optional):** set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to get a
+Telegram DM whenever someone posts a feature request. Unset either one and the feature is
+simply off; sending is best-effort and never affects the request itself.
 
 ## Deploy in 60 seconds (summary — details in [HOSTING.md](HOSTING.md))
 
