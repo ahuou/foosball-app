@@ -10,6 +10,10 @@ CSV + git) and on Vercel (GitHub Contents API as the database):
       write_player(name)           -> canonical display name (create if new)
       read_matches()               -> list[dict]  (rows of matches.csv)
       append_match(row)            -> new match id (row is a dict w/o 'id')
+      delete_player(name)          -> True if the roster row was removed
+      read_requests() / append_request(row) / update_request(...)
+      set_request_status(...) / delete_request(id)   (requests.csv)
+      read_replies()  / append_reply(row)            (request_replies.csv)
 
     LocalStore   — CSV under ./data/, best-effort `git commit` (today's LAN
                    semantics, unchanged).
@@ -36,7 +40,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-from core import PLAYERS_HEADER, MATCHES_HEADER, DEFAULT_SEED
+from core import (PLAYERS_HEADER, MATCHES_HEADER, REQUESTS_HEADER,
+                  REPLIES_HEADER, DEFAULT_SEED)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
@@ -157,11 +162,36 @@ class Store:
     def delete_match(self, match_id):
         raise NotImplementedError
 
-    def update_match(self, match_id, fields):
+    def update_match(self, match_id, fields, editor=None):
+        raise NotImplementedError
+
+    def delete_player(self, name):
+        raise NotImplementedError
+
+    def read_requests(self):
+        raise NotImplementedError
+
+    def append_request(self, row):
+        raise NotImplementedError
+
+    def update_request(self, request_id, title, content):
+        raise NotImplementedError
+
+    def set_request_status(self, request_id, status, by):
+        raise NotImplementedError
+
+    def delete_request(self, request_id):
+        raise NotImplementedError
+
+    def read_replies(self):
+        raise NotImplementedError
+
+    def append_reply(self, row):
         raise NotImplementedError
 
 
-def _new_match_id(existing_rows):
+def _new_row_id(existing_rows):
+    """Next free 'id' for any id-keyed CSV (matches, requests, replies)."""
     used = {r.get("id") for r in existing_rows}
     new_id = str(len(existing_rows) + 1)
     while new_id in used:
@@ -169,11 +199,24 @@ def _new_match_id(existing_rows):
     return new_id
 
 
-def _apply_match_update(rows, match_id, fields):
+def _normalize_matches(rows):
+    """Keep rows with an id; ensure the audit columns exist (old 8-col rows ->
+    edited_by/edited_at default to '')."""
+    out = []
+    for r in rows:
+        if not r.get("id"):
+            continue
+        r["edited_by"] = r.get("edited_by") or ""
+        r["edited_at"] = r.get("edited_at") or ""
+        out.append(r)
+    return out
+
+
+def _apply_match_update(rows, match_id, fields, editor=None):
     """
-    In-place: replace the mutable fields of the row whose id == match_id.
-    Keeps the original id, timestamp_iso, and recorded_by so ordering/history
-    stay stable. Returns True if the id was found.
+    In-place: replace the mutable fields of the row whose id == match_id, and
+    stamp the audit trail (edited_by = editor, edited_at = now). Keeps the
+    original id, timestamp_iso, and recorded_by. Returns True if the id existed.
     """
     match_id = str(match_id)
     for r in rows:
@@ -183,6 +226,88 @@ def _apply_match_update(rows, match_id, fields):
             r["team_b"] = fields["team_b"]
             r["score_a"] = str(int(fields["score_a"]))
             r["score_b"] = str(int(fields["score_b"]))
+            r["edited_by"] = editor or ""
+            r["edited_at"] = _now_iso()
+            return True
+    return False
+
+
+# --- Requests board (requests.csv + request_replies.csv) --------------------
+
+def _normalize_requests(rows):
+    """Keep rows with an id; fill missing columns with '' and default a blank
+    status to 'unseen' (the state every request is created in)."""
+    out = []
+    for r in rows:
+        if not r.get("id"):
+            continue
+        for col in REQUESTS_HEADER:
+            r[col] = r.get(col) or ""
+        r["status"] = r["status"].strip() or "unseen"
+        out.append(r)
+    return out
+
+
+def _normalize_replies(rows):
+    """Keep rows with an id; fill missing columns with ''."""
+    out = []
+    for r in rows:
+        if not r.get("id"):
+            continue
+        for col in REPLIES_HEADER:
+            r[col] = r.get(col) or ""
+        out.append(r)
+    return out
+
+
+def _build_request(rows, row):
+    """(new_id, full request row) for an append. Always born 'unseen'."""
+    new_id = _new_row_id(rows)
+    return new_id, {
+        "id": new_id,
+        "timestamp_iso": row.get("timestamp_iso") or _now_iso(),
+        "author": row.get("author") or "",
+        "title": row.get("title") or "",
+        "content": row.get("content") or "",
+        "status": "unseen",
+        "status_by": "", "status_at": "", "edited_at": "",
+    }
+
+
+def _build_reply(rows, row):
+    """(new_id, full reply row) for an append. Replies are write-once."""
+    new_id = _new_row_id(rows)
+    return new_id, {
+        "id": new_id,
+        "request_id": str(row.get("request_id") or ""),
+        "timestamp_iso": row.get("timestamp_iso") or _now_iso(),
+        "author": row.get("author") or "",
+        "content": row.get("content") or "",
+    }
+
+
+def _apply_request_update(rows, request_id, title, content):
+    """In-place title/content edit + edited_at stamp. Author, timestamp and
+    status are untouched. Returns True if the id existed."""
+    request_id = str(request_id)
+    for r in rows:
+        if str(r.get("id")) == request_id:
+            r["title"] = title
+            r["content"] = content
+            r["edited_at"] = _now_iso()
+            return True
+    return False
+
+
+def _apply_request_status(rows, request_id, status, by):
+    """In-place status change (anyone logged in may do this); stamps who/when.
+    Returns True if the id existed."""
+    request_id = str(request_id)
+    for r in rows:
+        if str(r.get("id")) == request_id:
+            r["status"] = status
+            r["status_by"] = by or ""
+            r["status_at"] = _now_iso()
             return True
     return False
 
@@ -195,17 +320,20 @@ class LocalStore(Store):
         self.data_dir = data_dir or os.path.join(self.app_dir, "data")
         self.players_csv = os.path.join(self.data_dir, "players.csv")
         self.matches_csv = os.path.join(self.data_dir, "matches.csv")
+        self.requests_csv = os.path.join(self.data_dir, "requests.csv")
+        self.replies_csv = os.path.join(self.data_dir, "request_replies.csv")
         self._lock = threading.Lock()
         self.ensure_storage()
 
     def ensure_storage(self):
         os.makedirs(self.data_dir, exist_ok=True)
-        if not os.path.exists(self.players_csv):
-            with open(self.players_csv, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(PLAYERS_HEADER)
-        if not os.path.exists(self.matches_csv):
-            with open(self.matches_csv, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(MATCHES_HEADER)
+        for path, header in ((self.players_csv, PLAYERS_HEADER),
+                             (self.matches_csv, MATCHES_HEADER),
+                             (self.requests_csv, REQUESTS_HEADER),
+                             (self.replies_csv, REPLIES_HEADER)):
+            if not os.path.exists(path):
+                with open(path, "w", newline="", encoding="utf-8") as f:
+                    csv.writer(f).writerow(header)
 
     def read_players(self):
         if not os.path.exists(self.players_csv):
@@ -217,7 +345,7 @@ class LocalStore(Store):
         if not os.path.exists(self.matches_csv):
             return []
         with open(self.matches_csv, "r", newline="", encoding="utf-8") as f:
-            return [row for row in csv.DictReader(f) if row.get("id")]
+            return _normalize_matches(list(csv.DictReader(f)))
 
     def write_player(self, name, seed_singles=DEFAULT_SEED, seed_doubles=DEFAULT_SEED):
         name = name.strip()
@@ -242,20 +370,22 @@ class LocalStore(Store):
 
     def append_match(self, row):
         with self._lock:
-            existing = self.read_matches()
-            new_id = _new_match_id(existing)
-            out = [
-                new_id,
-                row.get("timestamp_iso") or _now_iso(),
-                row["format"],
-                row["team_a"],
-                row["team_b"],
-                str(int(row["score_a"])),
-                str(int(row["score_b"])),
-                row["recorded_by"],
-            ]
-            with open(self.matches_csv, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(out)
+            rows = self.read_matches()   # normalized (audit cols present)
+            new_id = _new_row_id(rows)
+            rows.append({
+                "id": new_id,
+                "timestamp_iso": row.get("timestamp_iso") or _now_iso(),
+                "format": row["format"],
+                "team_a": row["team_a"],
+                "team_b": row["team_b"],
+                "score_a": str(int(row["score_a"])),
+                "score_b": str(int(row["score_b"])),
+                "recorded_by": row["recorded_by"],
+                "edited_by": "", "edited_at": "",
+            })
+            # Rewrite with the canonical 10-column header so a legacy 8-column
+            # file upgrades on first write (rows stay aligned).
+            self._rewrite_matches(rows)
         self._git_commit(f"match {new_id}")
         return new_id
 
@@ -274,16 +404,110 @@ class LocalStore(Store):
         self._git_commit(f"delete match {match_id}")
         return True
 
-    def update_match(self, match_id, fields):
+    def update_match(self, match_id, fields, editor=None):
         match_id = str(match_id)
         with self._lock:
             rows = self.read_matches()
-            found = _apply_match_update(rows, match_id, fields)
+            found = _apply_match_update(rows, match_id, fields, editor)
             if not found:
                 return False
             self._rewrite_matches(rows)
         self._git_commit(f"edit match {match_id}")
         return True
+
+    def delete_player(self, name):
+        """
+        Remove ONLY the roster row (case-insensitive). Matches are deliberately
+        left alone — a removed player with games still shows up in the boards
+        via replay. Returns True if a row was removed.
+        """
+        key = (name or "").strip().lower()
+        if not key:
+            return False
+        with self._lock:
+            rows = self.read_players()
+            gone = [r for r in rows if (r.get("name") or "").strip().lower() == key]
+            if not gone:
+                return False
+            kept = [r for r in rows if (r.get("name") or "").strip().lower() != key]
+            with open(self.players_csv, "w", newline="", encoding="utf-8") as f:
+                f.write(rows_to_csv(PLAYERS_HEADER, kept))
+        self._git_commit(f"remove player {gone[0]['name']}")
+        return True
+
+    # -- requests board ----------------------------------------------------
+    def read_requests(self):
+        if not os.path.exists(self.requests_csv):
+            return []
+        with open(self.requests_csv, "r", newline="", encoding="utf-8") as f:
+            return _normalize_requests(list(csv.DictReader(f)))
+
+    def read_replies(self):
+        if not os.path.exists(self.replies_csv):
+            return []
+        with open(self.replies_csv, "r", newline="", encoding="utf-8") as f:
+            return _normalize_replies(list(csv.DictReader(f)))
+
+    def _rewrite_requests(self, rows):
+        with open(self.requests_csv, "w", newline="", encoding="utf-8") as f:
+            f.write(rows_to_csv(REQUESTS_HEADER, rows))
+
+    def _rewrite_replies(self, rows):
+        with open(self.replies_csv, "w", newline="", encoding="utf-8") as f:
+            f.write(rows_to_csv(REPLIES_HEADER, rows))
+
+    def append_request(self, row):
+        with self._lock:
+            rows = self.read_requests()
+            new_id, full = _build_request(rows, row)
+            self._rewrite_requests(rows + [full])
+        self._git_commit(f"request {new_id}")
+        return new_id
+
+    def update_request(self, request_id, title, content):
+        request_id = str(request_id)
+        with self._lock:
+            rows = self.read_requests()
+            if not _apply_request_update(rows, request_id, title, content):
+                return False
+            self._rewrite_requests(rows)
+        self._git_commit(f"edit request {request_id}")
+        return True
+
+    def set_request_status(self, request_id, status, by):
+        request_id = str(request_id)
+        with self._lock:
+            rows = self.read_requests()
+            if not _apply_request_status(rows, request_id, status, by):
+                return False
+            self._rewrite_requests(rows)
+        self._git_commit(f"request {request_id} -> {status}")
+        return True
+
+    def delete_request(self, request_id):
+        """Remove the request AND every reply attached to it."""
+        request_id = str(request_id)
+        with self._lock:
+            rows = self.read_requests()
+            kept = [r for r in rows if str(r.get("id")) != request_id]
+            if len(kept) == len(rows):
+                return False  # id not found
+            self._rewrite_requests(kept)
+            replies = self.read_replies()
+            kept_replies = [r for r in replies
+                            if str(r.get("request_id")) != request_id]
+            if len(kept_replies) != len(replies):
+                self._rewrite_replies(kept_replies)
+        self._git_commit(f"delete request {request_id}")
+        return True
+
+    def append_reply(self, row):
+        with self._lock:
+            rows = self.read_replies()
+            new_id, full = _build_reply(rows, row)
+            self._rewrite_replies(rows + [full])
+        self._git_commit(f"reply {new_id}")
+        return new_id
 
     def _git_commit(self, message):
         """Best-effort commit of data/. Any failure is swallowed."""
@@ -311,6 +535,8 @@ class GitHubStore(Store):
         self.prefix = (prefix + "/") if prefix else ""
         self.players_path = self.prefix + "players.csv"
         self.matches_path = self.prefix + "matches.csv"
+        self.requests_path = self.prefix + "requests.csv"
+        self.replies_path = self.prefix + "request_replies.csv"
 
     # -- low-level HTTP (token sent as Bearer; never logged) ---------------
     def _api(self, method, path, params=None, json_body=None):
@@ -393,7 +619,7 @@ class GitHubStore(Store):
 
     def read_matches(self):
         text, _sha = self._get_file(self.matches_path)
-        return [r for r in parse_csv(text) if r.get("id")]
+        return _normalize_matches(parse_csv(text))
 
     def write_player(self, name, seed_singles=DEFAULT_SEED, seed_doubles=DEFAULT_SEED):
         name = name.strip()
@@ -420,7 +646,9 @@ class GitHubStore(Store):
 
     def append_match(self, row):
         def mutate(rows):
-            new_id = _new_match_id(rows)
+            # Normalize existing rows so a legacy 8-column blob upgrades cleanly.
+            rows = _normalize_matches(rows)
+            new_id = _new_row_id(rows)
             full = {
                 "id": new_id,
                 "timestamp_iso": row.get("timestamp_iso") or _now_iso(),
@@ -430,6 +658,7 @@ class GitHubStore(Store):
                 "score_a": str(int(row["score_a"])),
                 "score_b": str(int(row["score_b"])),
                 "recorded_by": row["recorded_by"],
+                "edited_by": "", "edited_at": "",
             }
             return (rows + [full], new_id, f"match {new_id}")
 
@@ -446,15 +675,105 @@ class GitHubStore(Store):
 
         return self._modify_file(self.matches_path, MATCHES_HEADER, mutate)
 
-    def update_match(self, match_id, fields):
+    def update_match(self, match_id, fields, editor=None):
         match_id = str(match_id)
 
         def mutate(rows):
-            if not _apply_match_update(rows, match_id, fields):
+            # Normalize first so untargeted legacy rows gain the audit columns
+            # and the rewrite lands the full 10-column header.
+            rows = _normalize_matches(rows)
+            if not _apply_match_update(rows, match_id, fields, editor):
                 return (None, False, None)  # id not found; no write
             return (rows, True, f"edit match {match_id}")
 
         return self._modify_file(self.matches_path, MATCHES_HEADER, mutate)
+
+    def delete_player(self, name):
+        """Remove ONLY the roster row (case-insensitive); matches untouched."""
+        key = (name or "").strip().lower()
+        if not key:
+            return False
+
+        def mutate(rows):
+            # Normalize first so untargeted legacy rows keep their seeds in the
+            # canonical 4-column rewrite.
+            rows = _normalize_players(rows)
+            gone = [r for r in rows if (r.get("name") or "").strip().lower() == key]
+            if not gone:
+                return (None, False, None)  # not on the roster; no write
+            kept = [r for r in rows if (r.get("name") or "").strip().lower() != key]
+            return (kept, True, f"remove player {gone[0]['name']}")
+
+        return self._modify_file(self.players_path, PLAYERS_HEADER, mutate)
+
+    # -- requests board ----------------------------------------------------
+    def read_requests(self):
+        text, _sha = self._get_file(self.requests_path)
+        return _normalize_requests(parse_csv(text))
+
+    def read_replies(self):
+        text, _sha = self._get_file(self.replies_path)
+        return _normalize_replies(parse_csv(text))
+
+    def append_request(self, row):
+        def mutate(rows):
+            rows = _normalize_requests(rows)
+            new_id, full = _build_request(rows, row)
+            return (rows + [full], new_id, f"request {new_id}")
+
+        return self._modify_file(self.requests_path, REQUESTS_HEADER, mutate)
+
+    def update_request(self, request_id, title, content):
+        request_id = str(request_id)
+
+        def mutate(rows):
+            rows = _normalize_requests(rows)
+            if not _apply_request_update(rows, request_id, title, content):
+                return (None, False, None)  # id not found; no write
+            return (rows, True, f"edit request {request_id}")
+
+        return self._modify_file(self.requests_path, REQUESTS_HEADER, mutate)
+
+    def set_request_status(self, request_id, status, by):
+        request_id = str(request_id)
+
+        def mutate(rows):
+            rows = _normalize_requests(rows)
+            if not _apply_request_status(rows, request_id, status, by):
+                return (None, False, None)  # id not found; no write
+            return (rows, True, f"request {request_id} -> {status}")
+
+        return self._modify_file(self.requests_path, REQUESTS_HEADER, mutate)
+
+    def delete_request(self, request_id):
+        """Two sequential writes: the request first, then its replies (each
+        skipped when nothing matched)."""
+        request_id = str(request_id)
+
+        def mutate(rows):
+            kept = [r for r in rows if str(r.get("id")) != request_id]
+            if len(kept) == len(rows):
+                return (None, False, None)  # id not found; no write
+            return (kept, True, f"delete request {request_id}")
+
+        removed = self._modify_file(self.requests_path, REQUESTS_HEADER, mutate)
+
+        def mutate_replies(rows):
+            kept = [r for r in rows if str(r.get("request_id")) != request_id]
+            if len(kept) == len(rows):
+                return (None, False, None)  # no replies to drop; no write
+            return (kept, True, f"delete replies of request {request_id}")
+
+        self._modify_file(self.replies_path, REPLIES_HEADER, mutate_replies)
+        return removed
+
+    def append_reply(self, row):
+        def mutate(rows):
+            rows = _normalize_replies(rows)
+            new_id, full = _build_reply(rows, row)
+            return (rows + [full], new_id, f"reply {new_id}")
+
+        return self._modify_file(self.replies_path, REPLIES_HEADER, mutate)
 
 
 # === Factory ================================================================

@@ -31,7 +31,16 @@ PLAYERS_HEADER = ["name", "created_at", "seed_singles", "seed_doubles"]
 MATCHES_HEADER = [
     "id", "timestamp_iso", "format",
     "team_a", "team_b", "score_a", "score_b", "recorded_by",
+    "edited_by", "edited_at",
 ]
+# Feature-request board (Requests tab): one row per request, replies in their
+# own file keyed by request_id (write-once, no edit/delete).
+REQUESTS_HEADER = [
+    "id", "timestamp_iso", "author", "title", "content",
+    "status", "status_by", "status_at", "edited_at",
+]
+REPLIES_HEADER = ["id", "request_id", "timestamp_iso", "author", "content"]
+REQUEST_STATUSES = ("unseen", "in works", "done")
 
 START_RATING = 1000.0    # default seed for unseeded players
 MIN_GAMES_FOR_TOP = 3   # must have played >= this many games to qualify as #1
@@ -494,6 +503,67 @@ def compute_stats(matches, roster=None, seed_map=None, fmt=None):
     }
 
 
+def compute_deltas(matches, roster=None, seed_map=None, fmt=None):
+    """
+    Pure: replay ONE rating track exactly like compute_stats and return
+    {str(match_id): transfer} — the zero-sum amount that moved for each match.
+    The winner gains exactly what the loser loses, so a single number describes
+    both sides (rendered as "±N" in the history tables).
+
+    Same sort key, same `fmt` filter, same seed handling, same skip rules and
+    the same margin-multiplier era gating as compute_stats, so the numbers here
+    are the ones the ratings were actually built from. Matches the replay skips
+    (empty teams / unparseable scores) are simply absent from the result.
+    """
+    matches = list(matches or [])
+    if fmt:
+        matches = [m for m in matches if match_format(m) == fmt]
+    matches.sort(key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
+
+    seed_map = seed_map or {}
+
+    def seed_of(n):
+        try:
+            return float(seed_map.get(n, START_RATING))
+        except (TypeError, ValueError):
+            return START_RATING
+
+    ratings = {}
+    for n in set(roster or []) | set(seed_map.keys()):
+        ratings.setdefault(n, seed_of(n))
+
+    def rget(n):
+        return ratings.get(n, seed_of(n))
+
+    deltas = {}
+    for m in matches:
+        team_a = _parse_team(m.get("team_a"))
+        team_b = _parse_team(m.get("team_b"))
+        if not team_a or not team_b:
+            continue
+        try:
+            score_a = int(m.get("score_a"))
+            score_b = int(m.get("score_b"))
+        except (TypeError, ValueError):
+            continue
+        for n in team_a + team_b:
+            ratings.setdefault(n, seed_of(n))
+
+        rating_a = sum(rget(n) for n in team_a) / len(team_a)
+        rating_b = sum(rget(n) for n in team_b) / len(team_b)
+        a_won = score_a > score_b
+        sm = margin_multiplier(score_a, score_b) if match_scored(m) else 1.0
+        a_delta, b_delta, meta = rating_delta(rating_a, rating_b, a_won, score_mult=sm)
+        deltas[str(m.get("id"))] = meta["transfer"]
+
+        for n in team_a:
+            ratings[n] = rget(n) + a_delta
+        for n in team_b:
+            ratings[n] = rget(n) + b_delta
+
+    return deltas
+
+
 def match_breakdown(matches, roster=None, seed_map=None, match_id=None, fmt=None):
     """
     Replay only the `fmt`-format matches and return the rating breakdown for the
@@ -686,9 +756,10 @@ form.card, .card {
   box-shadow: 0 1px 3px rgba(0,0,0,0.08);
 }
 label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 0.9rem; }
-input[type=text], input[type=number], select {
+input[type=text], input[type=number], select, textarea {
   width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1;
   border-radius: 6px; font-size: 1rem; background: #fff; color: #111;
+  font-family: inherit;
 }
 .btn {
   display: inline-block; margin-top: 14px; padding: 10px 18px;
@@ -780,7 +851,7 @@ table.matrix td.diag { background: #e5e7eb; }
   table, form.card, .card { background: #1f2937; box-shadow: none; }
   th { background: #374151; color: #cbd5e1; }
   th, td { border-bottom: 1px solid #374151; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], select, textarea {
     background: #111827; color: #e5e7eb; border-color: #4b5563; }
   .muted, .rank { color: #9ca3af; }
   .error { background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }
@@ -798,6 +869,8 @@ h1 { font-size: 1.5rem; margin: 4px 0 14px; }
   text-decoration: none; line-height: 1.3;
 }
 .btn-lg.secondary { background: #6b7280; }
+.btn-lg.danger { background: #dc2626; }
+.btn-lg.danger:hover { background: #b91c1c; }
 .btn-lg:active { filter: brightness(0.94); }
 .hub-greet { font-size: 1.5rem; font-weight: 700; margin: 14px 0 2px; }
 .hub-sub { color: #6b7280; margin: 0 0 22px; font-size: 0.95rem; }
@@ -843,6 +916,41 @@ h1 { font-size: 1.5rem; margin: 4px 0 14px; }
   .lb-row { background: #1f2937; box-shadow: none; }
   .tabbar { background: #1f2937; border-color: #374151; }
 }
+
+/* ===== requests board ===== */
+.req-head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; }
+.req-title { font-weight: 700; font-size: 1.05rem; }
+.req-body { white-space: pre-wrap; margin: 8px 0 6px; }
+.req-meta { color: #6b7280; font-size: 0.82rem; margin: 4px 0 8px; }
+.req-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 2px;
+  margin-top: 6px; }
+.req-ctl form { display: inline; margin: 0; }
+.req-ctl .lbl { color: #6b7280; font-size: 0.78rem; margin-right: 4px; }
+.btn-sm.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+.btn-sm.on:hover { background: #1d4ed8; }
+.badge {
+  display: inline-block; font-size: 0.68rem; font-weight: 700; padding: 2px 7px;
+  border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.badge.unseen { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.badge.works { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.badge.done { background: #ecfdf5; border: 1px solid #a7f3d0; color: #047857; }
+.replies { list-style: none; padding: 0; margin: 8px 0 0;
+  border-top: 1px solid #eee; }
+.replies li { padding: 6px 0; border-bottom: 1px solid #eee; font-size: 0.92rem; }
+.replies li:last-child { border-bottom: none; }
+.reply-form { display: flex; gap: 6px; margin-top: 8px; }
+.reply-form input[type=text] { flex: 1; }
+.reply-form .btn-sm { margin-top: 0; align-self: center; }
+@media (prefers-color-scheme: dark) {
+  .req-meta, .req-ctl .lbl { color: #9ca3af; }
+  .badge.unseen { background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }
+  .badge.works { background: #3a2e12; border-color: #78591c; color: #fcd34d; }
+  .badge.done { background: #14302a; border-color: #14532d; color: #6ee7b7; }
+  .replies, .replies li { border-color: #374151; }
+}
 """
 
 
@@ -853,6 +961,7 @@ def _tab_bar(active):
         ("matrix", "/matrix", "&#128200;", "Matrix"),
         ("history", "/history", "&#128340;", "History"),
         ("how", "/how", "&#129299;", "Nerd"),
+        ("requests", "/requests", "&#128161;", "Requests"),
     ]
     links = "".join(
         f"<a class='{'active' if key == active else ''}' href='{href}'>"
@@ -1000,6 +1109,21 @@ def _compact_board(data):
     return "<div class='lb'>" + "".join(rows) + "</div>"
 
 
+def _attribution(m):
+    """Muted 'by <recorder>' footnote under a history row, plus the edit audit
+    trail when the match has been changed since it was recorded."""
+    by = (m.get("recorded_by") or "").strip()
+    editor = (m.get("edited_by") or "").strip()
+    parts = []
+    if by:
+        parts.append(f"by {esc(by)}")
+    if editor:
+        parts.append(f"edited by {esc(editor)}")
+    if not parts:
+        return ""
+    return "<br><span class='muted'>" + " &middot; ".join(parts) + "</span>"
+
+
 def _match_controls(m, editable):
     """
     Edit + Delete controls for a match. Rendered ONLY for real stored matches:
@@ -1086,9 +1210,28 @@ def render_scores(matches, roster, who, board="singles", trial=False,
     return base_page("Scores — Foosball Tracker", body, trial=trial, tabs="board")
 
 
-def render_history(matches, who=None, trial=False):
+def _both_track_deltas(matches, roster=None, seed_singles=None, seed_doubles=None):
+    """
+    Merged {match_id: transfer} across both rating tracks. Singles and Doubles
+    replay independently (each with its own seed map), and every match belongs
+    to exactly one track, so the two dicts never collide.
+    """
+    deltas = compute_deltas(matches, roster, seed_map=seed_singles, fmt="1v1")
+    deltas.update(compute_deltas(matches, roster, seed_map=seed_doubles, fmt="2v2"))
+    return deltas
+
+
+def _delta_cell(deltas, m):
+    """'±N' for a rated match, '—' for one the replay skipped."""
+    t = deltas.get(str(m.get("id")))
+    return "&mdash;" if t is None else f"±{t}"
+
+
+def render_history(matches, who=None, trial=False, roster=None,
+                   seed_singles=None, seed_doubles=None):
     """Full match log, newest first, with Edit/Delete on real stored matches."""
     editable = not trial
+    deltas = _both_track_deltas(matches, roster, seed_singles, seed_doubles)
     ordered = sorted(matches or [],
                      key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     ordered = list(reversed(ordered))
@@ -1118,13 +1261,16 @@ def render_history(matches, who=None, trial=False):
             f"<td>{esc(match_format(m))}</td>"
             f"<td><span class='{a_cls}'>{a}</span> "
             f"<strong>{esc(sa)}–{esc(sb)}</strong> "
-            f"<span class='{b_cls}'>{b}</span></td>"
+            f"<span class='{b_cls}'>{b}</span>"
+            f"{_attribution(m)}</td>"
+            f"<td class='elo'>{_delta_cell(deltas, m)}</td>"
             f"<td>{_match_controls(m, editable)}</td>"
             "</tr>"
         )
     table = (
         "<table><thead><tr><th>When</th><th>Format</th><th>Match</th>"
-        "<th>Actions</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        "<th>&Delta;</th><th>Actions</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table>"
     )
     note = ("<p class='muted'>Trial/sample rows are marked “trial” and can't be "
             "edited (they're not saved).</p>") if trial else ""
@@ -1352,6 +1498,7 @@ def render_player(matches, roster, name, who=None, trial=False,
     d_stat = doubles["players"].get(canonical, _zero_stat(canonical, d_seed))
 
     # Combined match history (both formats), most recent first.
+    deltas = _both_track_deltas(matches, roster, seed_singles, seed_doubles)
     all_matches = sorted(matches or [],
                          key=lambda m: (m.get("timestamp_iso") or "", m.get("id") or ""))
     hist = []
@@ -1383,6 +1530,7 @@ def render_player(matches, roster, name, who=None, trial=False,
             f"<td class='{res_cls}'>{res_txt}</td>"
             f"<td>{my_score}–{opp_score}</td>"
             f"<td>vs {opp_str}{partner_str}</td>"
+            f"<td class='elo'>{_delta_cell(deltas, m)}</td>"
             f"<td class='muted'>{esc(m.get('format',''))}</td>"
             f"<td class='muted'>{when}</td>"
             "</tr>"
@@ -1391,7 +1539,8 @@ def render_player(matches, roster, name, who=None, trial=False,
     if hist:
         hist_table = (
             "<h2>Match history</h2><table><thead><tr>"
-            "<th>Result</th><th>Score</th><th>Opponents</th><th>Format</th><th>When</th>"
+            "<th>Result</th><th>Score</th><th>Opponents</th><th>&Delta;</th>"
+            "<th>Format</th><th>When</th>"
             "</tr></thead><tbody>" + "".join(hist) + "</tbody></table>"
         )
     else:
@@ -1403,9 +1552,24 @@ def render_player(matches, roster, name, who=None, trial=False,
         + _player_stat_block("Doubles (2v2)", d_stat)
         + "</div>"
     )
+    # Roster-only removal: offered for real stored players (never in trial, and
+    # never for names that only exist inside trial/sample matches).
+    on_roster = canonical.strip().lower() in {
+        (r or "").strip().lower() for r in (roster or [])}
+    remove = ""
+    if on_roster and not trial:
+        confirm = (f"Remove {canonical} from the roster? Their recorded matches "
+                   "(if any) are kept and still count in stats.")
+        remove = (
+            "<form method='post' action='/player/remove' "
+            f"onsubmit='return confirm({esc(_js_json(confirm))});'>"
+            f"<input type='hidden' name='name' value='{esc(canonical)}'>"
+            "<button class='btn-lg danger' type='submit'>Remove player</button>"
+            "</form>"
+        )
     body = (
         "<a class='backlink' href='/scores'>&#8249; Back</a>"
-        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table
+        f"<h1>{esc(canonical)}</h1>" + blocks + hist_table + remove
     )
     return base_page(f"{canonical} — Foosball Tracker", body, trial=trial), 200
 
@@ -1598,6 +1762,160 @@ def render_how(who=None, trial=False):
         "hand-tuned per player.</p>"
     )
     return base_page("How ratings work — Foosball Tracker", body, who, trial=trial, tabs="how")
+
+
+# === Requests board =========================================================
+
+# status value -> (badge css class, human label)
+_STATUS_UI = {
+    "unseen": ("unseen", "Unseen"),
+    "in works": ("works", "In works"),
+    "done": ("done", "Done"),
+}
+
+
+def request_status(r):
+    """Normalized status of a request row; anything unknown/blank -> 'unseen'."""
+    s = (r.get("status") or "").strip().lower()
+    return s if s in _STATUS_UI else "unseen"
+
+
+def is_request_author(r, who):
+    """True iff `who` (case-insensitively) authored this request."""
+    return bool(who) and (r.get("author") or "").strip().lower() == who.strip().lower()
+
+
+def _when(ts_iso):
+    """'2026-08-09T14:03:11+02:00' -> '2026-08-09 14:03' (escaped)."""
+    return esc((ts_iso or "")[:16].replace("T", " "))
+
+
+def _request_form(action, values=None, submit_label="Post request", hidden=""):
+    """Shared new/edit request form: title (required) + optional details."""
+    values = values or {}
+    return (
+        f"<form class='card' method='post' action='{esc(action)}'>"
+        + hidden +
+        "<label for='rq-title'>Title</label>"
+        "<input type='text' id='rq-title' name='title' autocomplete='off' "
+        f"value='{esc(values.get('title', ''))}' required>"
+        "<label for='rq-content'>Details <span class='muted'>(optional)</span></label>"
+        "<textarea id='rq-content' name='content' rows='3'>"
+        f"{esc(values.get('content', ''))}</textarea>"
+        f"<button class='btn-lg' type='submit'>{esc(submit_label)}</button>"
+        "</form>"
+    )
+
+
+def _status_controls(rid, current):
+    """Three inline POST buttons; the current status is rendered filled-in."""
+    out = ["<span class='lbl'>Status</span>"]
+    for value, (_cls, label) in _STATUS_UI.items():
+        on = " on" if value == current else ""
+        out.append(
+            "<form method='post' action='/requests/status'>"
+            f"<input type='hidden' name='id' value='{esc(rid)}'>"
+            f"<input type='hidden' name='status' value='{esc(value)}'>"
+            f"<button class='btn-sm{on}' type='submit'>{esc(label)}</button></form>"
+        )
+    return "".join(out)
+
+
+def _author_controls(rid):
+    """Edit + Delete, rendered only for the request's own author."""
+    return (
+        f"<a class='btn-sm' href='/requests/edit?id={urllib.parse.quote(rid)}'>Edit</a>"
+        "<form method='post' action='/requests/delete' "
+        "onsubmit=\"return confirm('Delete this request and its replies?');\">"
+        f"<input type='hidden' name='id' value='{esc(rid)}'>"
+        "<button class='btn-sm danger' type='submit'>Delete</button></form>"
+    )
+
+
+def _replies_html(rid, items, trial):
+    """Oldest-first reply list + (outside trial) the inline reply form."""
+    lis = "".join(
+        f"<li>{esc(r.get('content') or '')} "
+        f"<span class='muted'>&mdash; {esc(r.get('author') or '')} &middot; "
+        f"{_when(r.get('timestamp_iso'))}</span></li>"
+        for r in items)
+    out = f"<ul class='replies'>{lis}</ul>" if lis else ""
+    if not trial:
+        out += (
+            "<form class='reply-form' method='post' action='/requests/reply'>"
+            f"<input type='hidden' name='request_id' value='{esc(rid)}'>"
+            "<input type='text' name='content' placeholder='Write a reply…' "
+            "autocomplete='off' required>"
+            "<button class='btn-sm' type='submit'>Reply</button></form>"
+        )
+    return out
+
+
+def render_requests(requests, replies, who=None, trial=False, error=None,
+                    values=None):
+    """Feature-request board: post form (logged-in only) + cards, newest first."""
+    by_request = {}
+    for r in (replies or []):
+        by_request.setdefault(str(r.get("request_id")), []).append(r)
+    for items in by_request.values():
+        items.sort(key=lambda r: (r.get("timestamp_iso") or "", r.get("id") or ""))
+
+    err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+    if trial:
+        form = ("<p class='muted'>Trial mode is read-only here &mdash; log in with "
+                "your name to post.</p>")
+    else:
+        form = _request_form("/requests/new", values)
+
+    ordered = sorted(requests or [],
+                     key=lambda r: (r.get("timestamp_iso") or "", r.get("id") or ""),
+                     reverse=True)
+    cards = []
+    for r in ordered:
+        rid = str(r.get("id") or "")
+        status = request_status(r)
+        badge_cls, badge_label = _STATUS_UI[status]
+        edited = (" <span class='muted'>(edited)</span>"
+                  if (r.get("edited_at") or "").strip() else "")
+        ctl = ""
+        if not trial:
+            ctl = _status_controls(rid, status)
+            if is_request_author(r, who):
+                ctl += _author_controls(rid)
+        cards.append(
+            "<div class='card'>"
+            "<div class='req-head'>"
+            f"<span class='req-title'>{esc(r.get('title') or '')}</span>"
+            f"<span class='badge {badge_cls}'>{esc(badge_label)}</span>"
+            "</div>"
+            + (f"<div class='req-body'>{esc(r.get('content') or '')}</div>"
+               if (r.get("content") or "").strip() else "")
+            + f"<div class='req-meta'>{esc(r.get('author') or '')} &middot; "
+            f"{_when(r.get('timestamp_iso'))}{edited}</div>"
+            + (f"<div class='req-ctl'>{ctl}</div>" if ctl else "")
+            + _replies_html(rid, by_request.get(rid, []), trial)
+            + "</div>"
+        )
+    if not cards:
+        cards = ["<p class='muted'>No requests yet — be the first.</p>"]
+
+    body = (
+        "<a class='backlink' href='/'>&#8249; Home</a>"
+        "<h1>Requests</h1>" + err_html + form + "".join(cards)
+    )
+    return base_page("Requests — Foosball Tracker", body, trial=trial, tabs="requests")
+
+
+def render_request_edit(request_id, who=None, error=None, values=None, trial=False):
+    """Edit one of your own requests (author-only; enforced server-side)."""
+    err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+    hidden = f"<input type='hidden' name='id' value='{esc(request_id)}'>"
+    body = (
+        "<a class='backlink' href='/requests'>&#8249; Back to requests</a>"
+        "<h1>Edit request</h1>" + err_html
+        + _request_form("/requests/edit", values, "Save changes", hidden=hidden)
+    )
+    return base_page("Edit request — Foosball Tracker", body, trial=trial)
 
 
 def render_breakdown(bd, who=None, trial=False):

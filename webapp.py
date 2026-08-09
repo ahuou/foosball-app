@@ -228,8 +228,28 @@ def _handle_get(path, query, store, who, trial, is_trial, extra):
         return _html(core.render_record(roster, who, trial=is_trial))
 
     if path == "/history":
+        # Needs the roster + both seed maps so the Δ column replays the two
+        # rating tracks exactly like /scores does.
+        players = store.read_players()
+        names = [p["name"] for p in players]
         matches = store.read_matches() + (extra or [])
-        return _html(core.render_history(matches, who, is_trial))
+        s_map, d_map = _seed_maps(players)
+        return _html(core.render_history(matches, who, is_trial, roster=names,
+                                         seed_singles=s_map, seed_doubles=d_map))
+
+    if path == "/requests":
+        return _html(core.render_requests(store.read_requests(),
+                                          store.read_replies(), who, is_trial))
+
+    if path == "/requests/edit":
+        q = urllib.parse.parse_qs(query)
+        rid = (q.get("id", [""])[0]).strip()
+        req = next((r for r in store.read_requests() if str(r.get("id")) == rid), None)
+        # Unknown id, or somebody else's request -> nothing to edit here.
+        if req is None or not core.is_request_author(req, who):
+            return _redirect("/requests")
+        values = {"title": req.get("title") or "", "content": req.get("content") or ""}
+        return _html(core.render_request_edit(rid, who, values=values, trial=is_trial))
 
     if path == "/edit":
         q = urllib.parse.parse_qs(query)
@@ -267,6 +287,18 @@ def _handle_post(path, form, store, who, trial, is_trial, extra):
         return _post_edit(form, store, who, is_trial, extra)
     if path == "/delete":
         return _post_delete(form, store)
+    if path == "/player/remove":
+        return _post_player_remove(form, store, who, is_trial)
+    if path == "/requests/new":
+        return _post_request_new(form, store, who, is_trial)
+    if path == "/requests/reply":
+        return _post_request_reply(form, store, who, is_trial)
+    if path == "/requests/status":
+        return _post_request_status(form, store, who, is_trial)
+    if path == "/requests/edit":
+        return _post_request_edit(form, store, who, is_trial)
+    if path == "/requests/delete":
+        return _post_request_delete(form, store, who, is_trial)
     if path == "/trial/load-sample":
         return _post_sample(trial, load=True)
     if path == "/trial/clear-sample":
@@ -473,7 +505,7 @@ def _post_edit(form, store, who, is_trial, extra):
         "team_b": ";".join(team_b),
         "score_a": score_a,
         "score_b": score_b,
-    })
+    }, editor=who)
     return _redirect("/history")
 
 
@@ -483,6 +515,106 @@ def _post_delete(form, store):
     if mid:
         store.delete_match(mid)   # no-op if id not found / ephemeral
     return _redirect("/history")
+
+
+def _post_player_remove(form, store, who, is_trial):
+    """
+    Remove a player from the roster ONLY — their matches stay and keep counting
+    (intended for names added by mistake). Trial never writes.
+    """
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/scores")
+    name = (form.get("name", [""])[0]).strip()
+    if name:
+        store.delete_player(name)   # no-op if the name isn't on the roster
+    return _redirect("/scores")
+
+
+def _post_request_new(form, store, who, is_trial):
+    """Post a feature request. Title required, details optional."""
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/requests")
+    title = (form.get("title", [""])[0]).strip()
+    content = (form.get("content", [""])[0]).strip()
+    if not title:
+        return _html(core.render_requests(
+            store.read_requests(), store.read_replies(), who, is_trial,
+            error="A title is required.",
+            values={"title": title, "content": content}), 400)
+    store.append_request({"author": who, "title": title, "content": content})
+    return _redirect("/requests")
+
+
+def _post_request_reply(form, store, who, is_trial):
+    """Append a write-once reply to an existing request."""
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/requests")
+    rid = (form.get("request_id", [""])[0]).strip()
+    content = (form.get("content", [""])[0]).strip()
+    if not rid or not content:
+        return _redirect("/requests")
+    if not any(str(r.get("id")) == rid for r in store.read_requests()):
+        return _redirect("/requests")   # unknown request -> nothing to reply to
+    store.append_reply({"request_id": rid, "author": who, "content": content})
+    return _redirect("/requests")
+
+
+def _post_request_status(form, store, who, is_trial):
+    """Change a request's status — anyone logged in may do this."""
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/requests")
+    rid = (form.get("id", [""])[0]).strip()
+    status = (form.get("status", [""])[0]).strip()
+    if rid and status in core.REQUEST_STATUSES:
+        store.set_request_status(rid, status, who)
+    return _redirect("/requests")
+
+
+def _request_if_author(store, rid, who):
+    """The stored request with this id if `who` authored it, else None."""
+    req = next((r for r in store.read_requests() if str(r.get("id")) == rid), None)
+    if req is None or not core.is_request_author(req, who):
+        return None
+    return req
+
+
+def _post_request_edit(form, store, who, is_trial):
+    """Edit title/content of your OWN request (authorship checked server-side)."""
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/requests")
+    rid = (form.get("id", [""])[0]).strip()
+    title = (form.get("title", [""])[0]).strip()
+    content = (form.get("content", [""])[0]).strip()
+    if not rid or _request_if_author(store, rid, who) is None:
+        return _redirect("/requests")
+    if not title:
+        return _html(core.render_request_edit(
+            rid, who, error="A title is required.",
+            values={"title": title, "content": content}, trial=is_trial), 400)
+    store.update_request(rid, title, content)
+    return _redirect("/requests")
+
+
+def _post_request_delete(form, store, who, is_trial):
+    """Delete your OWN request and every reply on it."""
+    if not who:
+        return _redirect("/")
+    if is_trial:
+        return _redirect("/requests")
+    rid = (form.get("id", [""])[0]).strip()
+    if rid and _request_if_author(store, rid, who) is not None:
+        store.delete_request(rid)
+    return _redirect("/requests")
 
 
 def _post_sample(trial, load):
