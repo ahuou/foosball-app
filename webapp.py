@@ -36,7 +36,14 @@ from datetime import datetime
 
 import core
 import notify
-from store import get_secret
+from store import get_secret, READ_ONLY
+
+# Read-only mode (READ_ONLY=1, see store.py): every visitor is a trial session,
+# so they see the real league but can only record sandbox matches that live in
+# their own cookie. These are the only POST routes that stay open, because
+# none of them touches the store.
+core.READ_ONLY = READ_ONLY
+READ_ONLY_POSTS = ("/login", "/record", "/trial/load-sample", "/trial/clear-sample")
 
 TRIAL_MATCH_CAP = 50  # bound cookie size (browsers cap a cookie near 4KB)
 COOKIE_ATTRS = "Path=/; Max-Age=31536000; SameSite=Lax"
@@ -162,8 +169,17 @@ def handle(method, path, query, cookies, body, store):
     jar = _parse_cookies(cookies)
     who = _get_who(jar)
     trial = _get_trial(jar)
+    if READ_ONLY and who and trial is None:
+        # A real-login cookie (e.g. signed with a shared APP_SECRET) still only
+        # gets a sandbox view here.
+        trial = {"trial": True, "name": who, "sample": False, "matches": []}
     is_trial = trial is not None
     extra = _trial_extra_matches(trial) if is_trial else None
+
+    if READ_ONLY and method == "POST" and path not in READ_ONLY_POSTS:
+        return _html(core.render_read_only(who, is_trial), 403)
+    if READ_ONLY and method == "GET" and path in ("/edit", "/requests/edit"):
+        return _redirect("/history" if path == "/edit" else "/requests")
 
     if method == "GET":
         return _handle_get(path, query, store, who, trial, is_trial, extra)
@@ -316,6 +332,12 @@ def _post_login(form, store, trial):
     if not name:
         roster = core.roster_names(store.read_players())
         return _html(core.render_login(roster, None), 400)
+    if READ_ONLY:
+        # No player is created: entering a name just opens a sandbox session.
+        players = store.read_players()
+        name = core.canonical_name(players, name)
+        payload = {"trial": True, "name": name, "sample": False, "matches": []}
+        return _redirect("/", [_who_cookie(name), _trial_cookie(payload)])
     # Parse both starting ELOs independently: non-numeric -> default; clamped.
     # Ignored by the store if the (case-insensitive) name already exists.
     def _seed(field):
@@ -422,6 +444,8 @@ def _post_record(form, store, who, trial, is_trial, extra):
     if flags:
         return fail(flags=flags)
 
+    if READ_ONLY and not is_trial:
+        return _html(core.render_read_only(who, False), 403)
     if is_trial:
         # Canonicalize against known players WITHOUT creating any; append to the
         # signed trial cookie. Nothing touches the store / GitHub.

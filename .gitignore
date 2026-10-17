@@ -1,2 +1,4 @@
 secret.key
 __pycache__/
+.vercel
+.env*

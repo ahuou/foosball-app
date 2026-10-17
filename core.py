@@ -1081,6 +1081,12 @@ def _tab_bar(active):
     return f"<nav class='tabbar'>{links}</nav>"
 
 
+# Set by webapp from the READ_ONLY env flag (core itself does no IO). Only
+# changes wording and hides the new-player seed form; the actual write blocking
+# is server-side in webapp.handle and store.ReadOnlyStore.
+READ_ONLY = False
+
+
 def base_page(title, body, who=None, trial=False, tabs=None):
     """
     Minimal phone-first shell: a centered max-width column, an optional trial
@@ -1090,7 +1096,13 @@ def base_page(title, body, who=None, trial=False, tabs=None):
     compatibility but no longer drives any chrome.
     """
     banner = ""
-    if trial:
+    if READ_ONLY:
+        banner = (
+            "<div class='trialbar'>&#128274; READ-ONLY DEMO: you are viewing the "
+            "real league. Matches you record here are a private sandbox in your "
+            "browser and are never saved.</div>"
+        )
+    elif trial:
         banner = (
             "<div class='trialbar'>&#129514; TRIAL MODE — matches you record here "
             "are private to you and are deleted when you log out.</div>"
@@ -1391,15 +1403,44 @@ def render_history(matches, who=None, trial=False, roster=None,
 
 def render_login(roster, who=None, trial=False):
     """Logged-out home: one clean screen — name + Enter, seeds tucked away."""
+    if READ_ONLY:
+        intro = ("Type any name to browse the scores. This is a read-only demo: "
+                 "nothing you do here is saved.")
+    else:
+        intro = ("Type your name to check scores or record a match. "
+                 "No password — honor system.")
     body = (
         "<h1>&#127955; Foosball Tracker</h1>"
-        "<p class='hub-sub'>Type your name to check scores or record a match. "
-        "No password — honor system.</p>"
+        f"<p class='hub-sub'>{intro}</p>"
         "<form method='post' action='/login'>"
         "<label for='name'>Your name</label>"
         "<input type='text' id='name' name='name' list='players' data-roster "
         "autocomplete='off' required autofocus>"
-        + datalist_html("players", roster) +
+        + datalist_html("players", roster)
+        + ("" if READ_ONLY else _seed_details_html()) +
+        "<button class='btn-lg' type='submit'>Enter</button>"
+        "</form>"
+        "<p style='text-align:center;margin-top:18px'>"
+        "<a href='/trial'>Just browsing? &#129514; Try it out</a></p>"
+        + roster_autocomplete_script(roster)
+    )
+    return base_page("Foosball Tracker", body, trial=trial)
+
+
+def render_read_only(who=None, trial=False):
+    """403 page for a write attempted on a read-only deployment."""
+    body = (
+        "<a class='backlink' href='/'>&#8249; Home</a>"
+        "<h1>Read-only demo</h1>"
+        "<p class='muted'>This deployment only reads the league data; edits, "
+        "deletions, new players and requests are switched off.</p>"
+    )
+    return base_page("Read-only — Foosball Tracker", body, trial=trial)
+
+
+def _seed_details_html():
+    """Collapsed 'starting ELO' inputs for brand-new players."""
+    return (
         "<details style='margin:12px 0'>"
         "<summary style='cursor:pointer;color:#2563eb;padding:6px 0'>"
         "New here? Set starting ELO</summary>"
@@ -1414,13 +1455,7 @@ def render_login(roster, who=None, trial=False):
         f"min='{SEED_MIN}' max='{SEED_MAX}' inputmode='numeric'></div>"
         "</div>"
         "</details>"
-        "<button class='btn-lg' type='submit'>Enter</button>"
-        "</form>"
-        "<p style='text-align:center;margin-top:18px'>"
-        "<a href='/trial'>Just browsing? &#129514; Try it out</a></p>"
-        + roster_autocomplete_script(roster)
     )
-    return base_page("Foosball Tracker", body, trial=trial)
 
 
 def _did_you_mean_html(flags):
@@ -2152,7 +2187,9 @@ def render_requests(requests, replies, who=None, trial=False, error=None,
 
     err_html = f"<div class='error'>{esc(error)}</div>" if error else ""
     if trial:
-        form = ("<p class='muted'>Trial mode is read-only here &mdash; log in with "
+        form = ("<p class='muted'>Posting requests is switched off on this "
+                "read-only demo.</p>") if READ_ONLY else (
+                "<p class='muted'>Trial mode is read-only here &mdash; log in with "
                 "your name to post.</p>")
     else:
         form = _request_form("/requests/new", values)

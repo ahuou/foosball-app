@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import core
 import webapp
-from store import LocalStore
+from store import LocalStore, ReadOnlyStore, READ_ONLY
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
@@ -36,6 +36,8 @@ HOST = "0.0.0.0"
 PORT = 5000
 
 STORE = LocalStore(data_dir=DATA_DIR, app_dir=APP_DIR)
+if READ_ONLY:   # READ_ONLY=1 python app.py -> viewer mode, no writes
+    STORE = ReadOnlyStore(STORE)
 
 
 # === Sample-data fixtures (local nicety; deterministic, git-safe) ===========
@@ -177,13 +179,14 @@ def lan_ip_best_effort():
 
 
 def main():
-    STORE.ensure_storage()
-    try:
-        write_sample_files()  # refresh the deterministic sample fixtures
-    except Exception:
-        pass
+    if not READ_ONLY:   # read-only never touches data/, not even fixtures
+        STORE.ensure_storage()
+        try:
+            write_sample_files()  # refresh the deterministic sample fixtures
+        except Exception:
+            pass
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Serving on http://{HOST}:{PORT}")
+    print(f"Serving on http://{HOST}:{PORT}" + ("  (READ-ONLY)" if READ_ONLY else ""))
     ip = lan_ip_best_effort()
     if ip:
         print(f"LAN URL:    http://{ip}:{PORT}")

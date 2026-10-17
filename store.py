@@ -779,13 +779,61 @@ class GitHubStore(Store):
 # === Factory ================================================================
 
 def get_store():
-    """GitHubStore if GITHUB_TOKEN + GITHUB_REPO are set, else LocalStore."""
+    """
+    GitHubStore if GITHUB_TOKEN + GITHUB_REPO are set, else LocalStore.
+    With READ_ONLY on, the backend is wrapped so every write raises.
+    """
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPO")
     if token and repo:
-        return GitHubStore(
+        store = GitHubStore(
             token, repo,
             branch=os.environ.get("GITHUB_BRANCH", "main"),
             data_prefix=os.environ.get("GITHUB_DATA_PREFIX", "data/"),
         )
-    return LocalStore()
+    else:
+        store = LocalStore()
+    return ReadOnlyStore(store) if READ_ONLY else store
+
+
+# === Read-only mode =========================================================
+#
+# READ_ONLY=1 turns a deployment into a public viewer: it reads the real data
+# but can never change it. Two layers enforce this:
+#   1. webapp.handle refuses every POST that could reach the store and turns
+#      each visitor into a trial (sandbox) session, so the UI shows no write
+#      controls.
+#   2. ReadOnlyStore (below) wraps the real backend and raises on any write
+#      method, so a route missed by layer 1 fails loudly instead of writing.
+# Layer 2 is why a read-only GitHub token is enough for such a deployment.
+
+def _env_flag(name):
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+READ_ONLY = _env_flag("READ_ONLY")
+
+_READ_METHODS = ("read_players", "read_matches", "read_requests", "read_replies")
+_WRITE_METHODS = ("write_player", "append_match", "delete_match", "update_match",
+                  "delete_player", "append_request", "update_request",
+                  "set_request_status", "delete_request", "append_reply")
+
+
+class ReadOnlyError(PermissionError):
+    """A write was attempted on a read-only deployment."""
+
+
+class ReadOnlyStore(Store):
+    """Delegates reads to the wrapped store; every write method raises."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattribute__(self, attr):
+        if attr in _WRITE_METHODS:
+            def refuse(*_args, **_kwargs):
+                raise ReadOnlyError(f"read-only deployment: {attr} refused")
+            return refuse
+        if attr in _READ_METHODS:
+            return getattr(object.__getattribute__(self, "inner"), attr)
+        return object.__getattribute__(self, attr)
